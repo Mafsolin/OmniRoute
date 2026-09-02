@@ -1843,6 +1843,50 @@ test("handleImageGeneration routes codex image requests through /responses with 
   }
 });
 
+test("handleImageGeneration routes GPT Image 2 through Codex direct image endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  let captured;
+  globalThis.fetch = async (url, options = {}) => {
+    captured = {
+      url: String(url),
+      headers: options.headers,
+      body: JSON.parse(String(options.body || "{}")),
+    };
+    return new Response(
+      JSON.stringify({ data: [{ b64_json: "cG5n" }] }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  };
+
+  try {
+    const result = await handleImageGeneration({
+      body: {
+        model: "codex/gpt-image-2",
+        prompt: "Draw a blue square",
+        response_format: "b64_json",
+      },
+      credentials: {
+        accessToken: "codex-token",
+        providerSpecificData: { workspaceId: "acct-123" },
+      },
+      log: null,
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(captured.url, "https://chatgpt.com/backend-api/codex/images/generations");
+    assert.equal(captured.headers.Authorization, "Bearer codex-token");
+    assert.equal(captured.headers["chatgpt-account-id"], "acct-123");
+    assert.deepEqual(captured.body, {
+      model: "gpt-image-2",
+      prompt: "Draw a blue square",
+      response_format: "b64_json",
+    });
+    assert.equal(result.data.data[0].b64_json, "cG5n");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("handleImageGeneration (codex) defaults to b64_json when response_format is unset (#12268)", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {
