@@ -1,22 +1,36 @@
--- 159_remove_mimocode_provider.sql
--- MiMoCode was removed from OmniRoute, but installations that configured it
--- before removal can retain provider-scoped state. Remove that stale
--- configuration for both the canonical provider id and its historical alias.
+-- MiMoCode is no longer part of the upstream runtime, but existing
+-- installations may still contain a configured account and provider-scoped
+-- state. Preserve that state for migration, rollback, and auditability.
 --
--- Historical request, usage, and call-log records are intentionally preserved.
+-- The connection is fail-closed because the provider implementation is gone:
+-- keep the encrypted credentials and all related rows, but do not let the
+-- removed provider be selected by normal routing.
 
-DELETE FROM provider_connections
-WHERE provider IN ('mimocode', 'mcode');
+UPDATE exclusive_connection_leases
+SET state = 'INVALIDATED',
+    ended_at = COALESCE(ended_at, datetime('now')),
+    end_reason = COALESCE(end_reason, 'CONNECTION_INELIGIBLE')
+WHERE state = 'ACTIVE'
+  AND (
+    lower(trim(provider)) IN ('mimocode', 'mcode')
+    OR connection_id IN (
+      SELECT id
+      FROM provider_connections
+      WHERE lower(trim(provider)) IN ('mimocode', 'mcode')
+    )
+  );
 
-DELETE FROM registered_keys
-WHERE provider IN ('mimocode', 'mcode');
+UPDATE provider_connections
+SET is_active = 0,
+    test_status = 'unavailable',
+    error_code = 'PROVIDER_REMOVED',
+    last_error = 'Provider integration retired from OmniRoute; credentials retained.',
+    last_error_type = 'provider_removed',
+    last_error_source = 'migration:preserve-mimocode',
+    last_error_at = COALESCE(last_error_at, datetime('now')),
+    updated_at = datetime('now')
+WHERE lower(trim(provider)) IN ('mimocode', 'mcode');
 
-DELETE FROM provider_key_limits
-WHERE provider IN ('mimocode', 'mcode');
-
-DELETE FROM discovery_results
-WHERE provider_id IN ('mimocode', 'mcode');
-
-DELETE FROM key_value
-WHERE namespace = 'customModels'
-  AND key IN ('mimocode', 'mcode');
+-- Deliberately do not delete provider_connections, registered_keys,
+-- provider_key_limits, discovery_results, custom model metadata, or any
+-- historical usage/call-log rows.
