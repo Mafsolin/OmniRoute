@@ -2589,6 +2589,107 @@ async function handleCodexImageGeneration({
     headers["session_id"] = workspaceId;
   }
 
+  // ChatGPT currently rejects `gpt-image-2` on the generic Codex Responses
+  // endpoint with a model-access error. Its native image endpoint accepts the
+  // same OAuth credentials and returns the OpenAI image response shape, so use
+  // that endpoint for this one model while keeping the hosted-tool path for
+  // the GPT-5.6 image aliases.
+  if (model === "gpt-image-2") {
+    const directUrl =
+      referenceImages.length > 0
+        ? "https://chatgpt.com/backend-api/codex/images/edits"
+        : "https://chatgpt.com/backend-api/codex/images/generations";
+    const directBody: Record<string, unknown> = {
+      model: "gpt-image-2",
+      prompt,
+      response_format: "b64_json",
+    };
+    if (referenceImages.length > 0) {
+      directBody.images = referenceImages.map((image) => ({
+        image_url: `data:${image.mime || "image/png"};base64,${image.bytes.toString("base64")}`,
+      }));
+    }
+    for (const key of ["n", "quality", "size"] as const) {
+      if (body[key] !== undefined) directBody[key] = body[key];
+    }
+
+    try {
+      const directResponse = await fetch(directUrl, {
+        method: "POST",
+        headers: { ...headers, Accept: "application/json" },
+        body: JSON.stringify(directBody),
+        signal,
+      });
+      const directText = await directResponse.text();
+      let directJson: unknown = null;
+      try {
+        directJson = directText ? JSON.parse(directText) : null;
+      } catch {
+        directJson = null;
+      }
+
+      if (!directResponse.ok) {
+        return saveImageErrorResult({
+          provider,
+          model,
+          status: directResponse.status,
+          startTime,
+          error: sanitizeImageProviderError(directText),
+          requestBody: requestBodyForLog,
+          path: logPath,
+        });
+      }
+
+      const data =
+        directJson && typeof directJson === "object" && Array.isArray(directJson.data)
+          ? (directJson.data as Array<Record<string, unknown>>)
+          : [];
+      if (data.length === 0) {
+        return saveImageErrorResult({
+          provider,
+          model,
+          status: 502,
+          startTime,
+          error: "Codex image endpoint returned no images",
+          path: logPath,
+        });
+      }
+
+      const wantsUrl = body.response_format === "url";
+      const normalizedData = wantsUrl
+        ? data.map((item) =>
+            typeof item.b64_json === "string"
+              ? {
+                  url: `data:image/png;base64,${item.b64_json}`,
+                  ...(typeof item.revised_prompt === "string"
+                    ? { revised_prompt: item.revised_prompt }
+                    : {}),
+                }
+              : item
+          )
+        : data;
+
+      return saveImageSuccessResult({
+        provider,
+        model,
+        startTime,
+        requestBody: requestBodyForLog,
+        responseBody: { images_count: normalizedData.length },
+        images: normalizedData,
+        path: logPath,
+      });
+    } catch (error) {
+      return saveImageErrorResult({
+        provider,
+        model,
+        status: 502,
+        startTime,
+        error: sanitizeErrorMessage(error),
+        path: logPath,
+      });
+    }
+  }
+
   if (log) {
     const promptSummary =
       referenceImages.length > 0 ? `${prompt.length} chars` : `"${prompt.slice(0, 60)}..."`;
