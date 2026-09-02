@@ -87,6 +87,14 @@ export const NATIVE_ASSET_ENTRIES = [
     dest: ["node_modules", "better-sqlite3", "prebuilds"],
   },
   {
+    // wreq-js is optional and therefore invisible to Next's standalone trace.
+    // The TLS/WebSocket proxy requires the platform binding at runtime; keep
+    // the Linux x64 deployment artifact self-contained after a clean build.
+    label: "wreq-js Linux x64 native binding",
+    src: ["node_modules", "@wreq-js", "binding-linux-x64-gnu"],
+    dest: ["node_modules", "@wreq-js", "binding-linux-x64-gnu"],
+  },
+  {
     // onnxruntime-node's dist/binding.js dlopen()s a platform-specific
     // libonnxruntime.so.1 shipped under bin/napi-v3/<platform>/<arch>/ — a
     // *dynamic* native load Next.js's standalone file trace can't see (same
