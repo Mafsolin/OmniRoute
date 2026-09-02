@@ -29,6 +29,11 @@ export const codexProvider: RegistryEntry = {
   },
   models: [
     {
+      id: "gpt-image-2",
+      name: "GPT Image 2 (Codex OAuth)",
+      ...GPT_5_6_CODEX_CAPABILITIES,
+    },
+    {
       id: "gpt-5.6-sol",
       name: "GPT 5.6 Sol",
       ...GPT_5_6_CODEX_CAPABILITIES,
