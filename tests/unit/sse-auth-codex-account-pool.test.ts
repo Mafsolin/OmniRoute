@@ -11,6 +11,9 @@ process.env.API_KEY_SECRET ||= "sse-auth-codex-pool-test-secret";
 const core = await import("../../src/lib/db/core.ts");
 const providersDb = await import("../../src/lib/db/providers.ts");
 const auth = await import("../../src/sse/services/auth.ts");
+const quotaCache = await import("../../src/domain/quotaCache.ts");
+const codexQuotaFetcher = await import("../../open-sse/services/codexQuotaFetcher.ts");
+const originalFetch = globalThis.fetch;
 
 async function resetStorage() {
   core.resetDbInstance();
@@ -36,6 +39,11 @@ async function seedCodexConnection(overrides: Record<string, unknown>) {
 
 test.beforeEach(async () => {
   await resetStorage();
+  quotaCache.__clearForTests();
+});
+
+test.afterEach(() => {
+  globalThis.fetch = originalFetch;
 });
 
 test.after(() => {
@@ -89,6 +97,59 @@ test("Codex Spark preflight cooldown leaves normal models on the same parent sel
   assert.equal(persisted.rateLimitedUntil, undefined);
   assert.equal(persisted.testStatus, "active");
   assert.equal(persisted.providerSpecificData.codexScopeRateLimitedUntil.spark, resetAt);
+});
+
+test("Codex Luna reserve probe re-admits a child hidden by the regular 5h cooldown", async () => {
+  const resetAt = futureIso(120_000);
+  const connection = await seedCodexConnection({
+    name: "codex-luna-reserve-probe",
+    email: "codex-luna-reserve-probe@example.com",
+    accessToken: "codex-luna-reserve-probe-access",
+    refreshToken: "codex-luna-reserve-probe-refresh",
+    providerSpecificData: {
+      codexQuotaStateByScope: {
+        codex: {
+          usage5h: 100,
+          limit5h: 100,
+          resetAt5h: resetAt,
+          usage7d: 20,
+          limit7d: 100,
+          resetAt7d: futureIso(600_000),
+          observedAt: new Date().toISOString(),
+        },
+      },
+      codexExhaustedWindowByScope: { codex: "5h" },
+      codexScopeRateLimitedUntil: { codex: resetAt },
+      codexScopeRateLimitSource: { codex: "quota_reset" },
+    },
+  });
+
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        rate_limit: {
+          limit_reached: true,
+          primary_window: { used_percent: 100, reset_after_seconds: 120 },
+          secondary_window: { used_percent: 20, reset_after_seconds: 600 },
+        },
+        additional_rate_limits: [
+          {
+            limit_name: "gpt-reserve",
+            rate_limit: { primary_window: { used_percent: 0, reset_after_seconds: 3600 } },
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+
+  const selected = await auth.getProviderCredentials("codex", null, null, "gpt-5.6-luna");
+
+  assert.equal(selected.connectionId, connection.id);
+  assert.equal(
+    quotaCache.getQuotaWindowStatus(connection.id, "gpt-reserve")?.reachedThreshold,
+    false
+  );
+  codexQuotaFetcher.invalidateCodexQuotaCache(connection.id);
 });
 
 test("Codex preflight skips a blocked parent and selects a healthy sibling parent", async () => {

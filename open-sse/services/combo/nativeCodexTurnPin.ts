@@ -242,6 +242,7 @@ export async function isPinnedTargetModelScopedUnusable(args: {
     const cutoff = await resolveQuotaExhaustionCutoffForTarget(
       provider,
       connectionId,
+      target.modelStr,
       resilienceSettings,
       quotaCutoffResetWindowConfig,
       comboName,

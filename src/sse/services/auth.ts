@@ -45,6 +45,7 @@ import {
   getQuotaCache,
   getQuotaWindowStatus,
   hydrateCodexQuotaCacheForRequest,
+  isCodexLunaReserveProbeEligible,
   isQuotaExhaustedForRequest,
 } from "@/domain/quotaCache";
 import { getQuotaScopeLabelForProvider } from "@omniroute/open-sse/services/antigravityQuotaFamily.ts";
@@ -99,8 +100,11 @@ import {
 } from "@omniroute/open-sse/services/alibabaFreeTier.ts";
 
 import {
+  CODEX_LUNA_RESERVE_QUOTA,
+  CODEX_LUNA_RESERVE_QUOTA_WEEKLY,
   getCodexModelScope,
   getCodexQuotaWindowFilterForModel,
+  isCodexLunaModel,
   toCodexBaseQuotaWindowName,
   toCodexScopedQuotaWindowName,
 } from "@omniroute/open-sse/config/codexQuotaScopes.ts";
@@ -109,6 +113,7 @@ import {
   isCodexChildUnavailable,
   persistCodexChildCooldown,
 } from "@omniroute/open-sse/services/codexAccount/index.ts";
+import { fetchCodexQuota } from "@omniroute/open-sse/services/codexQuotaFetcher.ts";
 import {
   getProviderById,
   getProviderAlias,
@@ -320,6 +325,44 @@ function isTerminalConnectionStatusForModel(
   return true;
 }
 
+type CodexLunaReserveSnapshot = {
+  percentUsed: number;
+  resetAt: string | null;
+};
+
+/**
+ * Probe only Codex children whose persisted 5-hour quota cooldown would hide a
+ * possible Luna Reserve. The quota fetcher is cached/throttled, so this does not
+ * add a request for healthy accounts and never probes Sol, Terra, or Spark.
+ */
+async function loadCodexLunaReserveSnapshots(
+  connections: ProviderConnectionView[],
+  requestedModel: string | null
+): Promise<Map<string, CodexLunaReserveSnapshot>> {
+  const snapshots = new Map<string, CodexLunaReserveSnapshot>();
+  if (!isCodexLunaModel(requestedModel)) return snapshots;
+
+  const candidates = connections.filter((connection) =>
+    isCodexLunaReserveProbeEligible(connection, requestedModel)
+  );
+  if (candidates.length === 0) return snapshots;
+
+  await Promise.all(
+    candidates.map(async (connection) => {
+      const quota = await fetchCodexQuota(connection.id, {
+        ...(connection as unknown as Record<string, unknown>),
+        requestedModel,
+      }).catch(() => null);
+      if (quota?.usingLunaReserve !== true || !quota.lunaReserve || !quota.lunaReserveAvailable) {
+        return;
+      }
+      snapshots.set(connection.id, quota.lunaReserve);
+    })
+  );
+
+  return snapshots;
+}
+
 // #8200: cookie-auth providers (perplexity-web, grok-web, ...) use a rotating browser
 // session, not a static API key — a 401 means "session needs a refresh", not "dead".
 function isRecoverableCookieAuth401(
@@ -432,6 +475,18 @@ export function evaluateQuotaLimitPolicy(
       policy.thresholdPercent
     );
     if (!status?.reachedThreshold) continue;
+    // A regular Luna session window can be exhausted while the same account's
+    // separate `gpt-reserve` window still has capacity. In that state the
+    // upstream can legitimately serve Luna, so the local policy must not hide
+    // the account. Weekly exhaustion remains a hard stop.
+    if (
+      provider === "codex" &&
+      effectiveWindowName === "session" &&
+      isCodexLunaModel(requestedModel)
+    ) {
+      const reserve = getCodexLunaReserveStatus(connection.id, policy.thresholdPercent);
+      if (reserve && !reserve.reachedThreshold) continue;
+    }
     reasons.push(`${effectiveWindowName} usage ${Math.round(status.usedPercentage)}%`);
     resetCandidates.push(status.resetAt);
   }
@@ -481,6 +536,17 @@ function isResetAtInPast(resetAt: string | null): boolean {
   const resetMs = new Date(resetAt).getTime();
   return Number.isFinite(resetMs) && resetMs <= Date.now();
 }
+
+function getCodexLunaReserveStatus(
+  connectionId: string,
+  thresholdPercent: number
+): ReturnType<typeof getQuotaWindowStatus> {
+  return (
+    getQuotaWindowStatus(connectionId, CODEX_LUNA_RESERVE_QUOTA, thresholdPercent) ??
+    getQuotaWindowStatus(connectionId, CODEX_LUNA_RESERVE_QUOTA_WEEKLY, thresholdPercent)
+  );
+}
+
 function collectPolicyQuotaHeadroomPercentages(
   provider: string,
   connection: ProviderConnectionView,
@@ -498,6 +564,15 @@ function collectPolicyQuotaHeadroomPercentages(
     seenWindows.add(normalizedWindow);
 
     const status = getQuotaWindowStatus(connection.id, normalizedWindow, policy.thresholdPercent);
+    if (
+      status?.reachedThreshold &&
+      provider === "codex" &&
+      normalizedWindow === "session" &&
+      isCodexLunaModel(requestedModel)
+    ) {
+      const reserve = getCodexLunaReserveStatus(connection.id, policy.thresholdPercent);
+      if (reserve && !reserve.reachedThreshold) continue;
+    }
     if (status) pushClampedPercentage(percentages, status.remainingPercentage);
   }
 
@@ -513,10 +588,27 @@ function collectCachedQuotaHeadroomPercentages(
   const codexWindowFilter =
     provider === "codex" ? getCodexQuotaWindowFilterForModel(requestedModel) : undefined;
   const percentages: number[] = [];
+  const lunaReserveAvailable =
+    provider === "codex" &&
+    isCodexLunaModel(requestedModel) &&
+    Object.entries(rawQuotas).some(
+      ([quotaName, quota]) =>
+        getCodexQuotaWindowFilterForModel(requestedModel)?.(quotaName) &&
+        quota &&
+        quotaName.toLowerCase().includes("reserve") &&
+        Number(quota.remainingPercentage) > 0
+    );
 
   for (const [quotaName, quota] of Object.entries(rawQuotas)) {
     if (codexWindowFilter && !codexWindowFilter(quotaName)) continue;
     if (!quota || isResetAtInPast(toStringOrNull(quota.resetAt))) continue;
+    if (
+      lunaReserveAvailable &&
+      !quotaName.toLowerCase().includes("reserve") &&
+      Number(quota.remainingPercentage) <= 0
+    ) {
+      continue;
+    }
     pushClampedPercentage(percentages, toNumber(quota.remainingPercentage, Number.NaN));
   }
 
@@ -1330,6 +1422,20 @@ export async function getProviderCredentials(
     if (allowedConnections && allowedConnections.length > 0) {
       connections = connections.filter((conn) => allowedConnections.includes(conn.id));
     }
+
+    // A regular Luna 5-hour 429 creates a long-lived child cooldown. Give the
+    // same account one usage-endpoint probe before treating that cooldown as
+    // final; ChatGPT may expose `gpt-reserve`, which is valid only for Luna.
+    const lunaReserveByConnection =
+      provider === "codex"
+        ? await loadCodexLunaReserveSnapshots(connections, requestedModel)
+        : new Map<string, CodexLunaReserveSnapshot>();
+    for (const connection of connections) {
+      const reserve = lunaReserveByConnection.get(connection.id);
+      if (reserve) {
+        hydrateCodexQuotaCacheForRequest(connection, requestedModel, reserve);
+      }
+    }
     const forcedConnectionEligible = connections.some((conn) => conn.id === forcedConnectionId);
     if (options.lease && forcedConnectionId && !forcedConnectionEligible) return null;
     if (options.lease?.mode === "request" && forcedConnectionId) {
@@ -1342,7 +1448,10 @@ export async function getProviderCredentials(
     const isCodexScopeUnavailable = (
       connection: ProviderConnectionView,
       model: string | null
-    ): boolean => provider === "codex" && isCodexChildUnavailable(connection, model);
+    ): boolean =>
+      provider === "codex" &&
+      !(isCodexLunaModel(model) && lunaReserveByConnection.has(connection.id)) &&
+      isCodexChildUnavailable(connection, model);
 
     // #5903: an active session-affinity pin outranks a per-request reset-aware
     // forcedConnectionId (see sessionAffinityPin leaf for the full rationale).
@@ -1387,6 +1496,7 @@ export async function getProviderCredentials(
         allowRateLimitedConnections,
         bypassQuotaPolicy,
         isQuotaExhausted: (connectionId) =>
+          !lunaReserveByConnection.has(connectionId) &&
           isQuotaExhaustedForRequest(connectionId, provider, requestedModel),
         isQuotaPolicyBlocked: (connection) =>
           evaluateQuotaLimitPolicy(provider, connection as ProviderConnectionView, requestedModel)
@@ -1788,7 +1898,11 @@ export async function getProviderCredentials(
 
     if (provider === "codex") {
       for (const connection of peakHourEligibleConnections) {
-        hydrateCodexQuotaCacheForRequest(connection, requestedModel);
+        hydrateCodexQuotaCacheForRequest(
+          connection,
+          requestedModel,
+          lunaReserveByConnection.get(connection.id)
+        );
       }
     }
 

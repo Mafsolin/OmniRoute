@@ -5,6 +5,9 @@ export const CODEX_SPARK_DISPLAY_NAME = "GPT-5.3-Codex-Spark";
 export const CODEX_SPARK_METERED_FEATURE = "gpt_5_3_codex_spark";
 export const CODEX_SPARK_QUOTA_SESSION = `${CODEX_SPARK_METERED_FEATURE}_session`;
 export const CODEX_SPARK_QUOTA_WEEKLY = `${CODEX_SPARK_METERED_FEATURE}_weekly`;
+export const CODEX_LUNA_MODEL_ID = "gpt-5.6-luna";
+export const CODEX_LUNA_RESERVE_QUOTA = "gpt-reserve";
+export const CODEX_LUNA_RESERVE_QUOTA_WEEKLY = "gpt-reserve_weekly";
 
 const CODEX_SCOPE_PATTERNS: Array<{ pattern: string; scope: CodexQuotaScope }> = [
   { pattern: "codex-spark", scope: "spark" },
@@ -20,6 +23,18 @@ export function getCodexModelScope(model: string | null | undefined): CodexQuota
     if (lower.includes(pattern)) return scope;
   }
   return "codex";
+}
+
+/**
+ * Luna is part of the normal Codex scope, but ChatGPT can expose an additional
+ * `gpt-reserve` window that only Luna may spend after the regular short window
+ * is exhausted. Keep this predicate separate from `getCodexModelScope()` so
+ * Sol/Terra never inherit Luna's reserve capacity.
+ */
+export function isCodexLunaModel(model: string | null | undefined): boolean {
+  return String(model || "")
+    .toLowerCase()
+    .includes(CODEX_LUNA_MODEL_ID);
 }
 
 export function getCodexRateLimitKey(accountId: string, model: string): string {
@@ -42,6 +57,35 @@ export function isCodexSparkQuotaKey(key: string | null | undefined): boolean {
   );
 }
 
+export function isCodexLunaReserveQuotaKey(key: string | null | undefined): boolean {
+  const normalized = String(key || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  return (
+    normalized === "gpt_reserve" ||
+    normalized === "luna_reserve" ||
+    normalized === "gpt_reserve_weekly" ||
+    normalized === "luna_reserve_weekly"
+  );
+}
+
+export function isCodexLunaReserveLimitDescriptor(...values: unknown[]): boolean {
+  return values.some((value) => {
+    if (typeof value !== "string") return false;
+    const normalized = value
+      .trim()
+      .toLowerCase()
+      .replace(/[_\s]+/g, "-");
+    return (
+      normalized === "gpt-reserve" ||
+      normalized === "luna-reserve" ||
+      normalized === "gpt-reserve-weekly" ||
+      normalized === "luna-reserve-weekly"
+    );
+  });
+}
+
 export function isCodexSparkLimitDescriptor(...values: unknown[]): boolean {
   return values.some((value) => {
     if (typeof value !== "string") return false;
@@ -61,7 +105,11 @@ export function getCodexQuotaWindowFilterForModel(
   const scope = getCodexModelScope(model);
   return (windowName: string) => {
     const isSpark = isCodexSparkQuotaKey(windowName);
-    return scope === "spark" ? isSpark : !isSpark;
+    if (scope === "spark") return isSpark;
+    // The reserve is an entitlement of Luna only. Standard Codex models must
+    // not look healthy merely because a Luna reserve row is cached beside them.
+    if (isCodexLunaReserveQuotaKey(windowName)) return isCodexLunaModel(model);
+    return !isSpark;
   };
 }
 

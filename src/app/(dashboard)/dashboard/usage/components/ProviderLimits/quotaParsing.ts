@@ -5,9 +5,13 @@ const GLM_QUOTA_ORDER: Record<string, number> = { session: 0, weekly: 1, mcp_mon
 const CODEX_QUOTA_ORDER: Record<string, number> = {
   session: 0,
   weekly: 1,
-  gpt_5_3_codex_spark_session: 2,
-  gpt_5_3_codex_spark_weekly: 3,
-  banked_reset_credits: 4,
+  "gpt-reserve": 2,
+  gpt_reserve: 2,
+  "gpt-reserve_weekly": 3,
+  gpt_reserve_weekly: 3,
+  gpt_5_3_codex_spark_session: 4,
+  gpt_5_3_codex_spark_weekly: 5,
+  banked_reset_credits: 6,
 };
 const GLM_FAMILY_PROVIDERS = ["glm", "glm-cn", "glmt", "opencode-go"];
 const KIMI_CODING_PROVIDERS = ["kimi-coding", "kimi-coding-apikey"];

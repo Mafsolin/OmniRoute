@@ -56,14 +56,21 @@ export interface LatencySampleBuckets {
   allTtfts: number[];
   successfulTps: number[];
   allTps: number[];
+  /** Numerator/denominator pairs for a weighted post-TTFT TPS aggregate. */
+  successfulTpsOutputTokens: number;
+  successfulTpsGenerationMs: number;
+  allTpsOutputTokens: number;
+  allTpsGenerationMs: number;
 }
 
 /**
  * Push one usage_history row's latency/TTFT/tokens-per-second sample into the
- * accumulator buckets. Guards divide-by-zero by only deriving a tokens/sec
- * sample when both latencyMs and tokensOutput are positive; rows with
- * latencyMs <= 0 are skipped entirely, mirroring the pre-existing
- * allLatencies/successfulLatencies guard.
+ * accumulator buckets. TPS measures only the decode phase (end-to-end latency
+ * minus TTFT) and is accumulated as total output tokens / total decode time.
+ * This weighted form avoids a short one-token response dominating a long
+ * generation when the dashboard aggregates many requests. Rows with no valid
+ * decode interval or no provider-reported output tokens are excluded from TPS,
+ * while still contributing to latency/TTFT statistics.
  */
 export function accumulateLatencySample(
   buckets: LatencySampleBuckets,
@@ -75,11 +82,20 @@ export function accumulateLatencySample(
   if (latencyMs <= 0) return;
   buckets.allLatencies.push(latencyMs);
   if (ttftMs > 0) buckets.allTtfts.push(ttftMs);
-  if (tokensOutput > 0) buckets.allTps.push(tokensOutput / (latencyMs / 1000));
+  const generationMs = latencyMs - ttftMs;
+  if (generationMs > 0 && tokensOutput > 0) {
+    buckets.allTps.push(tokensOutput / (generationMs / 1000));
+    buckets.allTpsOutputTokens += tokensOutput;
+    buckets.allTpsGenerationMs += generationMs;
+  }
   if (!isSuccess) return;
   buckets.successfulLatencies.push(latencyMs);
   if (ttftMs > 0) buckets.successfulTtfts.push(ttftMs);
-  if (tokensOutput > 0) buckets.successfulTps.push(tokensOutput / (latencyMs / 1000));
+  if (generationMs > 0 && tokensOutput > 0) {
+    buckets.successfulTps.push(tokensOutput / (generationMs / 1000));
+    buckets.successfulTpsOutputTokens += tokensOutput;
+    buckets.successfulTpsGenerationMs += generationMs;
+  }
 }
 
 /** Per-provider/model accumulator for getModelLatencyStats() (#6875). */
@@ -102,6 +118,10 @@ export function createLatencyBucket(provider: string, model: string): LatencyBuc
     allTtfts: [],
     successfulTps: [],
     allTps: [],
+    successfulTpsOutputTokens: 0,
+    successfulTpsGenerationMs: 0,
+    allTpsOutputTokens: 0,
+    allTpsGenerationMs: 0,
   };
 }
 
@@ -127,8 +147,14 @@ export interface ModelLatencyStatsEntry {
    * already represents the full request wall-clock time (#6875).
    */
   avgE2ELatencyMs: number;
-  /** Mean output tokens/sec across successful rows (tokens_output / (latency_ms/1000)). */
-  avgTokensPerSecond: number;
+  /** Weighted output tokens/sec after TTFT, using provider-reported output tokens. */
+  avgTokensPerSecond: number | null;
+  /** Raw TPS numerator used to aggregate provider-level throughput correctly. */
+  tpsOutputTokens: number;
+  /** Raw TPS denominator in milliseconds used to aggregate provider-level throughput. */
+  tpsGenerationMs: number;
+  /** Number of rows contributing to the TPS numerator/denominator. */
+  tpsSampleCount: number;
 }
 
 /**
@@ -149,6 +175,12 @@ export function buildLatencyStatsEntry(
 
   const baseTtfts = useSuccessful ? bucket.successfulTtfts : bucket.allTtfts;
   const baseTps = useSuccessful ? bucket.successfulTps : bucket.allTps;
+  const tpsOutputTokens = useSuccessful
+    ? bucket.successfulTpsOutputTokens
+    : bucket.allTpsOutputTokens;
+  const tpsGenerationMs = useSuccessful
+    ? bucket.successfulTpsGenerationMs
+    : bucket.allTpsGenerationMs;
 
   const sorted = [...baseLatencies].sort((a, b) => a - b);
   const avg = mean(sorted);
@@ -170,7 +202,13 @@ export function buildLatencyStatsEntry(
     windowHours,
     avgTtftMs: Math.round(mean(baseTtfts)),
     avgE2ELatencyMs: Math.round(avg),
-    avgTokensPerSecond: Math.round(mean(baseTps) * 100) / 100,
+    avgTokensPerSecond:
+      tpsGenerationMs > 0 && tpsOutputTokens > 0
+        ? Math.round((tpsOutputTokens / (tpsGenerationMs / 1000)) * 100) / 100
+        : null,
+    tpsOutputTokens,
+    tpsGenerationMs,
+    tpsSampleCount: baseTps.length,
   };
 }
 

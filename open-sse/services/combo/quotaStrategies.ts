@@ -46,7 +46,11 @@ import {
 } from "./quotaScoring.ts";
 import { rankByHeadroom, type HeadroomSaturation } from "./headroomRanking.ts";
 import { preferAntigravityConnectionsWithStoredProject } from "../antigravityProjectPersist.ts";
-import { isQuotaExhaustedForRequest } from "../../../src/domain/quotaCache.ts";
+import {
+  isCodexLunaReserveProbeEligible,
+  isQuotaExhaustedForRequest,
+} from "../../../src/domain/quotaCache.ts";
+import { isCodexLunaModel } from "../../config/codexQuotaScopes.ts";
 
 const RESET_AWARE_CONNECTION_CACHE_TTL_MS = 30_000;
 const RESET_AWARE_QUOTA_FETCH_CONCURRENCY = 5;
@@ -62,6 +66,28 @@ const resetAwareQuotaCache = new Map<
   string,
   { fetchedAt: number; quota: unknown; refreshPromise: Promise<unknown> | null }
 >();
+
+function quotaCacheKey(
+  provider: string,
+  connectionId: string,
+  requestedModel?: string | null
+): string {
+  const normalizedModel =
+    typeof requestedModel === "string" && requestedModel.trim().length > 0
+      ? requestedModel.trim().toLowerCase()
+      : "";
+  return normalizedModel
+    ? `${provider}:${connectionId}:${normalizedModel}`
+    : `${provider}:${connectionId}`;
+}
+
+function connectionWithRequestedModel(
+  connection: Record<string, unknown> | undefined,
+  requestedModel?: string | null
+): Record<string, unknown> | undefined {
+  if (!requestedModel || requestedModel.trim().length === 0) return connection;
+  return { ...(connection ?? {}), requestedModel };
+}
 
 async function getQuotaAwareConnectionsForTarget(
   target: ResolvedComboTarget,
@@ -227,7 +253,15 @@ export async function expandTargetsByQuotaAwareConnections(
       ) {
         continue;
       }
-      if (provider && isQuotaExhaustedForRequest(connectionId, provider, target.modelStr || null)) {
+      const quotaProbeEligible =
+        provider === "codex" &&
+        isCodexLunaModel(target.modelStr) &&
+        Boolean(connection && isCodexLunaReserveProbeEligible(connection, target.modelStr));
+      if (
+        provider &&
+        !quotaProbeEligible &&
+        isQuotaExhaustedForRequest(connectionId, provider, target.modelStr || null)
+      ) {
         continue;
       }
       expandedTargets.push({
@@ -269,14 +303,18 @@ async function scoreQuotaAwareTargets<TScore extends object>({
       const provider = getResetAwareProvider(target);
       const fetcher = provider ? getQuotaFetcher(provider) : null;
       if (fetcher && provider && target.connectionId) {
-        const quotaKey = `${provider}:${target.connectionId}`;
+        const quotaKey = quotaCacheKey(provider, target.connectionId, target.modelStr);
         if (!quotaPromises.has(quotaKey)) {
           quotaPromises.set(
             quotaKey,
             fetchResetAwareQuotaWithCache({
               provider,
               connectionId: target.connectionId,
-              connection: connectionById.get(target.connectionId),
+              connection: connectionWithRequestedModel(
+                connectionById.get(target.connectionId),
+                target.modelStr
+              ),
+              requestedModel: target.modelStr,
               fetcher,
               config,
               log,
@@ -341,6 +379,7 @@ export async function fetchResetAwareQuotaWithCache({
   provider,
   connectionId,
   connection,
+  requestedModel,
   fetcher,
   config,
   log,
@@ -349,12 +388,14 @@ export async function fetchResetAwareQuotaWithCache({
   provider: string;
   connectionId: string;
   connection?: Record<string, unknown>;
+  requestedModel?: string | null;
   fetcher: (connectionId: string, connection?: Record<string, unknown>) => Promise<unknown>;
   config: QuotaFetchCacheConfig;
   log: { debug?: (...args: unknown[]) => void; warn?: (...args: unknown[]) => void };
   comboName: string;
 }): Promise<unknown> {
-  const cacheKey = `${provider}:${connectionId}`;
+  const cacheKey = quotaCacheKey(provider, connectionId, requestedModel);
+  const fetchConnection = connectionWithRequestedModel(connection, requestedModel);
   const ttlMs = config.quotaCacheTtlMs;
   const maxStaleMs = config.quotaCacheMaxStaleMs;
   const now = Date.now();
@@ -362,7 +403,7 @@ export async function fetchResetAwareQuotaWithCache({
 
   if (ttlMs <= 0 && maxStaleMs <= 0) {
     try {
-      return await fetcher(connectionId, connection);
+      return await fetcher(connectionId, fetchConnection);
     } catch (error) {
       log.warn?.("COMBO", "Reset-aware quota fetch failed.", {
         comboName,
@@ -379,7 +420,7 @@ export async function fetchResetAwareQuotaWithCache({
     const existing = resetAwareQuotaCache.get(cacheKey);
     if (existing?.refreshPromise != null) return existing.refreshPromise;
 
-    const refreshPromise = fetcher(connectionId, connection)
+    const refreshPromise = fetcher(connectionId, fetchConnection)
       .then((quota) => {
         if (quota) {
           if (

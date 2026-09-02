@@ -28,9 +28,11 @@ import {
 } from "@/lib/db/quotaSnapshots";
 import { recordProviderQuotaResetEventIfChanged } from "@/lib/db/quotaResetEvents";
 import {
+  CODEX_LUNA_RESERVE_QUOTA,
   CODEX_SPARK_QUOTA_SESSION,
   CODEX_SPARK_QUOTA_WEEKLY,
   getCodexQuotaWindowFilterForModel,
+  isCodexLunaModel,
 } from "@omniroute/open-sse/config/codexQuotaScopes.ts";
 import {
   createCodexAccountPool,
@@ -269,6 +271,45 @@ export function __clearForTests() {
   getState().cache.clear();
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * A Codex Luna account with an authoritative 5-hour reset cooldown is still a
+ * valid candidate for one reserve probe. The actual reserve entitlement is
+ * confirmed asynchronously by `fetchCodexQuota`; this predicate only prevents
+ * the stale child cooldown from hiding that account before the probe runs.
+ */
+export function isCodexLunaReserveProbeEligible(
+  connection: {
+    provider?: string | null;
+    providerSpecificData?: Readonly<Record<string, unknown>> | null;
+  },
+  requestedModel: string | null | undefined,
+  now = Date.now()
+): boolean {
+  if (connection.provider !== "codex" || !isCodexLunaModel(requestedModel)) return false;
+  const data = asRecord(connection.providerSpecificData);
+  const exhaustedByScope = asRecord(data.codexExhaustedWindowByScope);
+  const exhaustedWindow = exhaustedByScope.codex ?? data.codexExhaustedWindow;
+  const quotaByScope = asRecord(data.codexQuotaStateByScope);
+  const quotaState = asRecord(quotaByScope.codex);
+  const usage5h = Number(quotaState.usage5h);
+  const limit5h = Number(quotaState.limit5h);
+  const fiveHourStillFull =
+    Number.isFinite(usage5h) && Number.isFinite(limit5h) && limit5h > 0 && usage5h >= limit5h;
+  if (exhaustedWindow !== "5h" && !fiveHourStillFull) return false;
+
+  const cooldownByScope = asRecord(data.codexScopeRateLimitedUntil);
+  const cooldown = cooldownByScope.codex;
+  if (typeof cooldown !== "string" || cooldown.trim().length === 0) return false;
+  const cooldownMs = new Date(cooldown).getTime();
+  return Number.isFinite(cooldownMs) && cooldownMs > now;
+}
+
 function resolveAntigravityQuotaWindowsForModel(
   quotaNames: string[],
   requestedModel: string
@@ -355,6 +396,11 @@ function mergeCodexPersistedQuota(
   }
 }
 
+export interface CodexLunaReserveQuotaSnapshot {
+  percentUsed: number;
+  resetAt: string | null;
+}
+
 /** Overlay one Codex child's persisted quota facts into the existing request cache. */
 export function hydrateCodexQuotaCacheForRequest(
   connection: {
@@ -362,7 +408,8 @@ export function hydrateCodexQuotaCacheForRequest(
     provider: string;
     providerSpecificData?: Readonly<Record<string, unknown>> | null;
   },
-  requestedModel: string | null
+  requestedModel: string | null,
+  lunaReserve?: CodexLunaReserveQuotaSnapshot | null
 ): void {
   if (connection.provider !== "codex" || !requestedModel?.trim()) return;
   const pool = createCodexAccountPool({
@@ -373,7 +420,7 @@ export function hydrateCodexQuotaCacheForRequest(
   const account = resolveCodexAccount(pool, requestedModel);
   if (account.kind !== "child") return;
   const hydration = getCodexChildQuotaHydration(account);
-  if (!hydration.quotaState) return;
+  if (!hydration.quotaState && !lunaReserve) return;
 
   const { cache } = getState();
   const entry = cache.get(connection.id) ||
@@ -385,7 +432,16 @@ export function hydrateCodexQuotaCacheForRequest(
       exhausted: false,
       nextResetAt: null,
     };
-  mergeCodexPersistedQuota(entry, hydration.scope, hydration.quotaState);
+  if (hydration.quotaState) {
+    mergeCodexPersistedQuota(entry, hydration.scope, hydration.quotaState);
+  }
+  if (isCodexLunaModel(requestedModel) && lunaReserve && Number.isFinite(lunaReserve.percentUsed)) {
+    entry.quotas[CODEX_LUNA_RESERVE_QUOTA] = {
+      remainingPercentage: clampPercent((1 - lunaReserve.percentUsed) * 100),
+      resetAt: lunaReserve.resetAt ?? null,
+      fractionReported: true,
+    };
+  }
   let exhaustedResetAt: string | null = null;
   if (hydration.exhaustedWindow) {
     const windowName =

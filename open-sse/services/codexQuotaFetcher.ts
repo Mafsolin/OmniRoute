@@ -17,9 +17,13 @@
  */
 
 import {
+  CODEX_LUNA_RESERVE_QUOTA,
+  CODEX_LUNA_RESERVE_QUOTA_WEEKLY,
   CODEX_SPARK_QUOTA_SESSION,
   CODEX_SPARK_QUOTA_WEEKLY,
   getCodexModelScope,
+  isCodexLunaModel,
+  isCodexLunaReserveLimitDescriptor,
   isCodexSparkLimitDescriptor,
 } from "../config/codexQuotaScopes.ts";
 import { registerQuotaFetcher, registerQuotaWindows, type QuotaInfo } from "./quotaPreflight.ts";
@@ -32,8 +36,7 @@ import { getCodexBackendIdentityHeaders } from "../config/codexClient.ts";
  * surfaced by `getCodexUsage` (in usage.ts) and rendered by the dashboard,
  * so per-window thresholds set in the UI line up with the keys persisted
  * in `provider_connections.quota_window_thresholds_json`. The dedicated
- * Codex fetcher exposes only session + weekly today; the plan-dependent
- * code_review window is surfaced by the generic path when present.
+ * Codex fetcher also exposes the Luna-only reserve windows when present.
  */
 export const CODEX_WINDOW_SESSION = "session"; // primary 5-hour window
 export const CODEX_WINDOW_WEEKLY = "weekly"; //  secondary 7-day window
@@ -58,6 +61,12 @@ export interface CodexDualWindowQuota extends QuotaInfo {
   bankedResetCredits?: number;
   /** Which window is currently reported as blocking, when the upstream exposes it. */
   rateLimitReachedType?: string;
+  /** The Luna-only reserve window, when ChatGPT exposes it for this account. */
+  lunaReserve?: { percentUsed: number; resetAt: string | null };
+  /** True when the reserve has remaining capacity and can be used by Luna. */
+  lunaReserveAvailable: boolean;
+  /** True when the selected `windows` map is the Luna reserve fallback. */
+  usingLunaReserve: boolean;
 }
 
 interface CacheEntry {
@@ -114,7 +123,12 @@ export function registerCodexConnection(connectionId: string, meta: CodexConnect
 }
 
 function getQuotaCacheKey(connectionId: string, requestedModel?: string | null): string {
-  return `${connectionId}:${getCodexModelScope(requestedModel)}`;
+  const scope = getCodexModelScope(requestedModel);
+  // Luna and Sol share the normal Codex scope but must not share a snapshot:
+  // once Luna switches to `gpt-reserve`, Sol still has to see its own regular
+  // 5h/7d windows.
+  const modelVariant = isCodexLunaModel(requestedModel) ? ":luna" : "";
+  return `${connectionId}:${scope}${modelVariant}`;
 }
 
 function deleteQuotaCacheForConnection(connectionId: string): void {
@@ -262,7 +276,7 @@ export async function fetchCodexQuota(
     if (!quota) return null;
 
     // Store in cache
-    if (!quotaCache.has(connectionId) && quotaCache.size >= MAX_QUOTA_CACHE_ENTRIES) {
+    if (!quotaCache.has(cacheKey) && quotaCache.size >= MAX_QUOTA_CACHE_ENTRIES) {
       const oldestCacheKey = quotaCache.keys().next().value;
       if (oldestCacheKey !== undefined) quotaCache.delete(oldestCacheKey);
     }
@@ -364,6 +378,45 @@ function findSparkRateLimit(data: Record<string, unknown>): Record<string, unkno
   return null;
 }
 
+function findLunaReserveRateLimit(data: Record<string, unknown>): {
+  rateLimit: Record<string, unknown>;
+  limitName?: string;
+} {
+  const additional = data["additional_rate_limits"] ?? data["additionalRateLimits"];
+  if (!Array.isArray(additional)) return { rateLimit: {} };
+
+  for (const entryValue of additional) {
+    const entry = toRecord(entryValue);
+    if (
+      !isCodexLunaReserveLimitDescriptor(
+        entry["limit_name"],
+        entry["limitName"],
+        entry["metered_feature"],
+        entry["meteredFeature"],
+        entry["limit_id"],
+        entry["limitId"],
+        entry["id"],
+        entry["name"],
+        entry["title"],
+        entry["model"],
+        entry["model_id"],
+        entry["modelId"]
+      )
+    ) {
+      continue;
+    }
+    const rawLimitName = entry["limit_name"] ?? entry["limitName"];
+    return {
+      rateLimit: toRecord(entry["rate_limit"] ?? entry["rateLimit"] ?? entry),
+      ...(typeof rawLimitName === "string" && rawLimitName.trim().length > 0
+        ? { limitName: rawLimitName.trim() }
+        : {}),
+    };
+  }
+
+  return { rateLimit: {} };
+}
+
 function getCodexRateLimitWindows(rateLimit: Record<string, unknown>): {
   primary: { percentUsed: number; resetAt: string | null } | null;
   secondary: { percentUsed: number; resetAt: string | null } | null;
@@ -395,6 +448,44 @@ function getSelectedCodexRateLimit(
   return normalRateLimit;
 }
 
+function isRateLimitReached(rateLimit: Record<string, unknown>): boolean {
+  return Boolean(rateLimit["limit_reached"] ?? rateLimit["limitReached"]);
+}
+
+function isWindowExhausted(
+  window: { percentUsed: number; resetAt: string | null } | null
+): boolean {
+  return window !== null && window.percentUsed >= 1;
+}
+
+function shouldUseLunaReserve(
+  requestedModel: string | null | undefined,
+  normalRateLimit: Record<string, unknown>,
+  normalPrimary: { percentUsed: number; resetAt: string | null } | null,
+  normalSecondary: { percentUsed: number; resetAt: string | null } | null,
+  reserveRateLimit: Record<string, unknown>,
+  reserveWindow: { percentUsed: number; resetAt: string | null } | null,
+  rateLimitReachedType: string | undefined
+): boolean {
+  if (!isCodexLunaModel(requestedModel) || !reserveWindow) return false;
+
+  const reserveHasCapacity =
+    !isRateLimitReached(reserveRateLimit) && !isWindowExhausted(reserveWindow);
+  if (!reserveHasCapacity) return false;
+
+  // The reserve is intended to bridge the short (5h) Luna limit. A weekly
+  // exhaustion signal must remain authoritative; do not silently turn a fully
+  // exhausted weekly account into an apparently healthy one.
+  const reachedType = (rateLimitReachedType || "").toLowerCase();
+  const weeklyReached =
+    reachedType.includes("secondary") ||
+    reachedType.includes("weekly") ||
+    reachedType.includes("7d") ||
+    isWindowExhausted(normalSecondary);
+  const primaryReached = isWindowExhausted(normalPrimary);
+  return !weeklyReached && (primaryReached || isRateLimitReached(normalRateLimit));
+}
+
 function parseCodexUsageResponse(
   data: unknown,
   requestedModel?: string | null
@@ -402,12 +493,25 @@ function parseCodexUsageResponse(
   const obj = toRecord(data);
   const normalRateLimit = toRecord(obj["rate_limit"] ?? obj["rateLimit"]);
   const sparkRateLimit = findSparkRateLimit(obj);
+  const lunaReserve = findLunaReserveRateLimit(obj);
+  const lunaReserveRateLimit = lunaReserve.rateLimit;
   const useSparkWindows = getCodexModelScope(requestedModel) === "spark";
-  const selectedRateLimit = getSelectedCodexRateLimit(
+  const normalWindows = getCodexRateLimitWindows(normalRateLimit);
+  const reserveWindows = getCodexRateLimitWindows(lunaReserveRateLimit);
+  const reserveWindow = reserveWindows.primary ?? reserveWindows.secondary;
+  const rateLimitReachedType = parseRateLimitReachedType(obj);
+  const usingLunaReserve = shouldUseLunaReserve(
+    requestedModel,
     normalRateLimit,
-    sparkRateLimit,
-    useSparkWindows
+    normalWindows.primary,
+    normalWindows.secondary,
+    lunaReserveRateLimit,
+    reserveWindow,
+    rateLimitReachedType
   );
+  const selectedRateLimit = usingLunaReserve
+    ? lunaReserveRateLimit
+    : getSelectedCodexRateLimit(normalRateLimit, sparkRateLimit, useSparkWindows);
   if (!selectedRateLimit) return null;
 
   // Require at least one window to be present for the requested scope.
@@ -416,17 +520,32 @@ function parseCodexUsageResponse(
   if (!parsedPrimary && !parsedSecondary) return null;
 
   const window5h = parsedPrimary ?? { percentUsed: 0, resetAt: null };
-  const window7d = parsedSecondary ?? { percentUsed: 0, resetAt: null };
+  // Reserve capacity replaces only Luna's short-window budget. Keep the
+  // ordinary weekly window in the selected snapshot so a weekly cutoff still
+  // blocks the request while Luna is spending reserve capacity.
+  const window7d = (usingLunaReserve ? normalWindows.secondary : parsedSecondary) ??
+    parsedSecondary ?? { percentUsed: 0, resetAt: null };
   const worstPercentUsed = Math.max(window5h.percentUsed, window7d.percentUsed);
   const limitReached = Boolean(
     selectedRateLimit["limit_reached"] ?? selectedRateLimit["limitReached"]
   );
 
   const windows: Record<string, { percentUsed: number; resetAt: string | null }> = {};
-  assignCodexWindows(windows, selectedRateLimit, {
-    primary: useSparkWindows ? CODEX_SPARK_QUOTA_SESSION : CODEX_WINDOW_SESSION,
-    secondary: useSparkWindows ? CODEX_SPARK_QUOTA_WEEKLY : CODEX_WINDOW_WEEKLY,
-  });
+  if (usingLunaReserve) {
+    const reservePrimary = reserveWindows.primary ?? reserveWindows.secondary;
+    if (reservePrimary) windows[CODEX_WINDOW_SESSION] = reservePrimary;
+    if (normalWindows.secondary) windows[CODEX_WINDOW_WEEKLY] = normalWindows.secondary;
+    // If the reserve payload has two windows, retain the second one under its
+    // explicit reserve key instead of replacing the ordinary weekly window.
+    if (reserveWindows.primary && reserveWindows.secondary) {
+      windows[CODEX_LUNA_RESERVE_QUOTA_WEEKLY] = reserveWindows.secondary;
+    }
+  } else {
+    assignCodexWindows(windows, selectedRateLimit, {
+      primary: useSparkWindows ? CODEX_SPARK_QUOTA_SESSION : CODEX_WINDOW_SESSION,
+      secondary: useSparkWindows ? CODEX_SPARK_QUOTA_WEEKLY : CODEX_WINDOW_WEEKLY,
+    });
+  }
   const allWindows: Record<string, { percentUsed: number; resetAt: string | null }> = {
     ...windows,
   };
@@ -442,8 +561,19 @@ function parseCodexUsageResponse(
     secondary: CODEX_WINDOW_WEEKLY,
   });
 
+  if (reserveWindows.primary) allWindows[CODEX_LUNA_RESERVE_QUOTA] = reserveWindows.primary;
+  if (reserveWindows.secondary) {
+    allWindows[CODEX_LUNA_RESERVE_QUOTA_WEEKLY] = reserveWindows.secondary;
+  }
+
   const bankedResetCredits = parseBankedResetCredits(obj);
-  const rateLimitReachedType = parseRateLimitReachedType(obj);
+  const lunaReserveWindow = reserveWindow;
+  const lunaReserveAvailable = Boolean(
+    isCodexLunaModel(requestedModel) &&
+    lunaReserveWindow &&
+    !isRateLimitReached(lunaReserveRateLimit) &&
+    !isWindowExhausted(lunaReserveWindow)
+  );
 
   return {
     used: Math.round(worstPercentUsed * 100),
@@ -464,6 +594,9 @@ function parseCodexUsageResponse(
     // Banked reset credits (display-only, eligibility-gated — issue #5199).
     ...(bankedResetCredits !== undefined ? { bankedResetCredits } : {}),
     ...(rateLimitReachedType !== undefined ? { rateLimitReachedType } : {}),
+    ...(lunaReserveWindow ? { lunaReserve: lunaReserveWindow } : {}),
+    lunaReserveAvailable,
+    usingLunaReserve,
   };
 }
 
@@ -521,6 +654,8 @@ export function registerCodexQuotaFetcher(): void {
   registerQuotaWindows("codex", [
     CODEX_WINDOW_SESSION,
     CODEX_WINDOW_WEEKLY,
+    CODEX_LUNA_RESERVE_QUOTA,
+    CODEX_LUNA_RESERVE_QUOTA_WEEKLY,
     CODEX_SPARK_QUOTA_SESSION,
     CODEX_SPARK_QUOTA_WEEKLY,
   ]);

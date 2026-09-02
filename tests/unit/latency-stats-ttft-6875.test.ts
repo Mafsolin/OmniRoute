@@ -35,10 +35,10 @@ test.after(() => {
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
-test("getModelLatencyStats aggregates avgTtftMs/avgE2ELatencyMs/avgTokensPerSecond over successful rows", async () => {
+test("getModelLatencyStats aggregates avgTtftMs/avgE2ELatencyMs and weighted post-TTFT TPS", async () => {
   const now = Date.now();
-  // latencyMs / ttft / tokensOutput chosen so tokens/sec is a clean number per row:
-  // 50/(1000/1000)=50, 100/(2000/1000)=50, 300/(4000/1000)=75 -> mean 58.33
+  // TPS excludes TTFT and uses one weighted numerator/denominator across rows:
+  // (50 + 100 + 300) / ((900 + 1800 + 3700) / 1000) = 70.3125.
   const rows = [
     { latencyMs: 1000, ttftMs: 100, tokensOutput: 50 },
     { latencyMs: 2000, ttftMs: 200, tokensOutput: 100 },
@@ -70,7 +70,10 @@ test("getModelLatencyStats aggregates avgTtftMs/avgE2ELatencyMs/avgTokensPerSeco
   // column exists in usage_history beyond latency_ms/ttft_ms).
   assert.equal(entry.avgE2ELatencyMs, entry.avgLatencyMs);
   assert.equal(entry.avgE2ELatencyMs, 2333);
-  assert.equal(Math.round(entry.avgTokensPerSecond * 100) / 100, 58.33);
+  assert.equal(Math.round((entry.avgTokensPerSecond ?? 0) * 100) / 100, 70.31);
+  assert.equal(entry.tpsOutputTokens, 450);
+  assert.equal(entry.tpsGenerationMs, 6400);
+  assert.equal(entry.tpsSampleCount, 3);
 });
 
 test("getModelLatencyStats guards divide-by-zero when latency_ms <= 0 for tokens/sec", async () => {
@@ -103,9 +106,12 @@ test("getModelLatencyStats guards divide-by-zero when latency_ms <= 0 for tokens
   assert.ok(entry);
   assert.ok(Number.isFinite(entry.avgTokensPerSecond));
   // Only the latencyMs=1000 row can contribute a valid tokens/sec sample
-  // (100 tokens / 1s = 100 tok/s); the zero-latency row must be excluded,
+  // (100 tokens / (1000-50)ms); the zero-latency row must be excluded,
   // not divide-by-zero into Infinity/NaN.
-  assert.equal(entry.avgTokensPerSecond, 100);
+  assert.equal(entry.avgTokensPerSecond, Math.round((100 / 0.95) * 100) / 100);
+  assert.equal(entry.tpsOutputTokens, 100);
+  assert.equal(entry.tpsGenerationMs, 950);
+  assert.equal(entry.tpsSampleCount, 1);
 });
 
 test("getModelLatencyStats TTFT falls back to all-sample TTFTs when successful sample count is below minSamples", async () => {

@@ -117,10 +117,12 @@ test("remaining percentage helpers reflect remaining quota and stale resets refi
   assert.equal(providerLimitUtils.calculatePercentage(parsed[0].used, parsed[0].total), 100);
 });
 
-test("Codex quota rows use stable OpenAI Codex order with banked reset credits last", () => {
+test("Codex quota rows use stable OpenAI Codex order with Luna Reserve before Spark", () => {
   const parsed = providerLimitUtils.parseQuotaData("codex", {
     bankedResetCredits: 2,
     quotas: {
+      "gpt-reserve": { used: 25, total: 100, remainingPercentage: 75 },
+      "gpt-reserve_weekly": { used: 10, total: 100, remainingPercentage: 90 },
       gpt_5_3_codex_spark_weekly: { used: 100, total: 100, remainingPercentage: 0 },
       weekly: { used: 2, total: 100, remainingPercentage: 98 },
       gpt_5_3_codex_spark_session: { used: 0, total: 100, remainingPercentage: 100 },
@@ -133,13 +135,17 @@ test("Codex quota rows use stable OpenAI Codex order with banked reset credits l
     [
       "session",
       "weekly",
+      "gpt-reserve",
+      "gpt-reserve_weekly",
       "gpt_5_3_codex_spark_session",
       "gpt_5_3_codex_spark_weekly",
       "banked_reset_credits",
     ]
   );
-  assert.equal(providerLimitUtils.formatQuotaLabel(parsed[2].name), "GPT-5.3-Codex-Spark Session");
-  assert.equal(providerLimitUtils.formatQuotaLabel(parsed[4].name), "Banked Reset Credits");
+  assert.equal(providerLimitUtils.formatQuotaLabel(parsed[2].name), "Luna Reserve");
+  assert.equal(providerLimitUtils.formatQuotaLabel(parsed[3].name), "Luna Reserve Weekly");
+  assert.equal(providerLimitUtils.formatQuotaLabel(parsed[4].name), "GPT-5.3-Codex-Spark Session");
+  assert.equal(providerLimitUtils.formatQuotaLabel(parsed[6].name), "Banked Reset Credits");
 });
 
 test("percentage-only quotas hide redundant usage counts while counted quotas keep them", () => {

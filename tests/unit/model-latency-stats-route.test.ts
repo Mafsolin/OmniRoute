@@ -136,6 +136,21 @@ test("model latency stats route filters by model query param", async () => {
   assert.equal(body.entries[0].model, "gpt-4o-mini");
 });
 
+test("model latency stats route accepts the ten-year retention window used by TPS total", async () => {
+  await enableManagementAuth();
+  await seedUsage("openai", "gpt-4o-mini", 100);
+
+  const response = await route.GET(
+    await makeManagementSessionRequest(
+      "http://localhost/api/usage/model-latency-stats?windowHours=87600"
+    )
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.windowHours, 87600);
+  assert.equal(body.entries.length, 1);
+});
+
 test("model latency stats route excludes provider/model pairs below minSamples", async () => {
   await enableManagementAuth();
   await seedUsage("openai", "gpt-4o-mini", 100);

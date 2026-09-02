@@ -1,7 +1,10 @@
 import {
+  CODEX_LUNA_RESERVE_QUOTA,
+  CODEX_LUNA_RESERVE_QUOTA_WEEKLY,
   CODEX_SPARK_DISPLAY_NAME,
   CODEX_SPARK_QUOTA_SESSION,
   CODEX_SPARK_QUOTA_WEEKLY,
+  isCodexLunaReserveLimitDescriptor,
   isCodexSparkLimitDescriptor,
 } from "../config/codexQuotaScopes.ts";
 
@@ -231,6 +234,46 @@ function findCodexReviewRateLimit(data: JsonRecord): JsonRecord {
   return {};
 }
 
+function findCodexLunaReserveRateLimit(data: JsonRecord): {
+  rateLimit: JsonRecord;
+  limitName?: string;
+} {
+  const additionalRateLimits = getFieldValue(
+    data,
+    "additional_rate_limits",
+    "additionalRateLimits"
+  );
+  if (!Array.isArray(additionalRateLimits)) return { rateLimit: {} };
+
+  for (const entryValue of additionalRateLimits) {
+    const entry = toRecord(entryValue);
+    if (
+      !isCodexLunaReserveLimitDescriptor(
+        getFieldValue(entry, "limit_name", "limitName"),
+        getFieldValue(entry, "metered_feature", "meteredFeature"),
+        getFieldValue(entry, "limit_id", "limitId"),
+        entry.id,
+        entry.name,
+        entry.title,
+        entry.model,
+        getFieldValue(entry, "model_id", "modelId")
+      )
+    ) {
+      continue;
+    }
+    const rawLimitName = getFieldValue(entry, "limit_name", "limitName");
+    const limitName =
+      typeof rawLimitName === "string" && rawLimitName.trim().length > 0
+        ? rawLimitName.trim()
+        : undefined;
+    return {
+      rateLimit: toRecord(getFieldValue(entry, "rate_limit", "rateLimit") ?? entry),
+      ...(limitName ? { limitName } : {}),
+    };
+  }
+  return { rateLimit: {} };
+}
+
 /**
  * Codex "banked reset credits" — an eligibility-gated field some ChatGPT plans
  * expose on the /wham/usage payload: a count of extra rate-limit resets the
@@ -326,6 +369,38 @@ export function buildCodexUsageQuotas(dataValue: unknown): {
     getFieldValue(codeReviewSecondaryWindow, "remaining_count", "remainingCount") !== null
   ) {
     quotas.code_review_weekly = buildPercentageQuota(codeReviewSecondaryWindow);
+  }
+
+  // Some ChatGPT plans expose a separate `gpt-reserve` window. It is a
+  // Luna-only entitlement used after the regular short window is exhausted;
+  // keep it as its own row so routing and the dashboard can distinguish it
+  // from the ordinary `session`/`weekly` limits.
+  const lunaReserve = findCodexLunaReserveRateLimit(data);
+  const lunaReserveRateLimit = lunaReserve.rateLimit;
+  // `limit_name: "gpt-reserve"` is an upstream identifier, not a useful
+  // operator-facing label. Preserve a future descriptive name, but keep the
+  // known identifier readable in the dashboard.
+  const lunaReserveDisplayName =
+    lunaReserve.limitName && !isCodexLunaReserveLimitDescriptor(lunaReserve.limitName)
+      ? lunaReserve.limitName
+      : "Luna Reserve";
+  const lunaReservePrimaryWindow = toRecord(
+    getFieldValue(lunaReserveRateLimit, "primary_window", "primaryWindow")
+  );
+  const lunaReserveSecondaryWindow = toRecord(
+    getFieldValue(lunaReserveRateLimit, "secondary_window", "secondaryWindow")
+  );
+  if (Object.keys(lunaReservePrimaryWindow).length > 0) {
+    quotas[CODEX_LUNA_RESERVE_QUOTA] = buildPercentageQuota(
+      lunaReservePrimaryWindow,
+      lunaReserveDisplayName
+    );
+  }
+  if (Object.keys(lunaReserveSecondaryWindow).length > 0) {
+    quotas[CODEX_LUNA_RESERVE_QUOTA_WEEKLY] = buildPercentageQuota(
+      lunaReserveSecondaryWindow,
+      `${lunaReserveDisplayName} Weekly`
+    );
   }
 
   const spark = findCodexSparkRateLimit(data);

@@ -16,6 +16,8 @@ const PROVIDER_COLUMNS: Record<string, string[]> = {
   codex: [
     "session",
     "weekly",
+    "gpt-reserve",
+    "gpt-reserve_weekly",
     "gpt_5_3_codex_spark_session",
     "gpt_5_3_codex_spark_weekly",
     "banked_reset_credits",

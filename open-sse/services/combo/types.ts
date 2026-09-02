@@ -155,7 +155,7 @@ export type HistoricalLatencyStatsEntry = {
   /** Mean end-to-end request latency (ms) from getModelLatencyStats() (#6875). */
   avgE2ELatencyMs?: number;
   /** Mean output tokens/sec from getModelLatencyStats() (#6875). */
-  avgTokensPerSecond?: number;
+  avgTokensPerSecond?: number | null;
 };
 
 export type AutoProviderCandidate = ProviderCandidate & {

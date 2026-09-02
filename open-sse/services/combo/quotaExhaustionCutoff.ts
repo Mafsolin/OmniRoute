@@ -94,6 +94,7 @@ export function buildAutoQuotaThresholds(
 export async function resolveQuotaExhaustionCutoffForTarget(
   provider: string,
   connectionId: string | undefined,
+  requestedModel: string | null | undefined,
   resilienceSettings: ResilienceSettings | null | undefined,
   resetWindowConfig: ResetWindowConfig,
   comboName: string,
@@ -118,7 +119,10 @@ export async function resolveQuotaExhaustionCutoffForTarget(
     const quota = await fetchResetAwareQuotaWithCache({
       provider,
       connectionId,
-      connection,
+      connection: connection
+        ? { ...connection, ...(requestedModel ? { requestedModel } : {}) }
+        : connection,
+      requestedModel,
       fetcher,
       config: resetWindowConfig,
       log,

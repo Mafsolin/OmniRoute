@@ -16,19 +16,32 @@ import { Card } from "@/shared/components";
 
 interface ProviderStat {
   provider: string;
+  providerId?: string;
   totalRequests: number;
   successfulRequests: number;
   avgLatencyMs: number;
   totalTokensIn: number;
   totalTokensOut: number;
+  avgTokensPerSecond: number | null;
 }
 
 interface ModelStat {
   provider: string;
+  providerId?: string;
   model: string;
   requests: number;
   avgLatencyMs: number;
   successfulRequests: number;
+  avgTokensPerSecond: number | null;
+}
+
+interface ModelLatencySnapshot {
+  provider: string;
+  model: string;
+  avgTokensPerSecond: number | null;
+  tpsOutputTokens?: number;
+  tpsGenerationMs?: number;
+  tpsSampleCount?: number;
 }
 
 interface ToolLatencyStat {
@@ -41,6 +54,7 @@ type SortKey =
   | "totalRequests"
   | "successfulRequests"
   | "avgLatencyMs"
+  | "avgTokensPerSecond"
   | "totalTokensIn"
   | "totalTokensOut"
   | "avgTtftAfterToolMs"
@@ -79,6 +93,10 @@ function formatLatency(ms: number | null): string {
   return `${Math.round(ms)}ms`;
 }
 
+function formatTps(tps: number | null | undefined): string {
+  return typeof tps === "number" && Number.isFinite(tps) && tps > 0 ? tps.toFixed(2) : "—";
+}
+
 function successRate(successful: number, total: number): string {
   if (total === 0) return "—";
   return `${((successful / total) * 100).toFixed(1)}%`;
@@ -96,6 +114,7 @@ export default function ProviderStatsPage() {
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [tpsWindowHours, setTpsWindowHours] = useState(24);
   const [sortKey, setSortKey] = useState<SortKey>("totalRequests");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
@@ -105,13 +124,56 @@ export default function ProviderStatsPage() {
       const res = await fetch("/api/provider-stats");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
-      setData(json);
+      const latencyRes = await fetch(
+        `/api/usage/model-latency-stats?windowHours=${tpsWindowHours}&minSamples=3&maxRows=50000`
+      ).catch(() => null);
+      const latencyJson = latencyRes?.ok ? await latencyRes.json().catch(() => null) : null;
+      const latencyEntries = Array.isArray(latencyJson?.entries)
+        ? (latencyJson.entries as ModelLatencySnapshot[])
+        : [];
+      const byModel = new Map<string, ModelLatencySnapshot>();
+      const byProvider = new Map<string, { outputTokens: number; generationMs: number }>();
+      for (const entry of latencyEntries) {
+        if (!entry || typeof entry.provider !== "string" || typeof entry.model !== "string") {
+          continue;
+        }
+        byModel.set(`${entry.provider}/${entry.model}`, entry);
+        const outputTokens = Number(entry.tpsOutputTokens);
+        const generationMs = Number(entry.tpsGenerationMs);
+        if (!Number.isFinite(outputTokens) || outputTokens <= 0) continue;
+        if (!Number.isFinite(generationMs) || generationMs <= 0) continue;
+        const aggregate = byProvider.get(entry.provider) ?? { outputTokens: 0, generationMs: 0 };
+        aggregate.outputTokens += outputTokens;
+        aggregate.generationMs += generationMs;
+        byProvider.set(entry.provider, aggregate);
+      }
+
+      const models = (json.models ?? []).map((model: ModelStat) => {
+        const providerId = model.providerId ?? model.provider;
+        const entry = byModel.get(`${providerId}/${model.model}`);
+        return {
+          ...model,
+          avgTokensPerSecond: entry?.avgTokensPerSecond ?? null,
+        };
+      });
+      const providers = (json.providers ?? []).map((provider: ProviderStat) => {
+        const providerId = provider.providerId ?? provider.provider;
+        const aggregate = byProvider.get(providerId);
+        return {
+          ...provider,
+          avgTokensPerSecond:
+            aggregate && aggregate.generationMs > 0
+              ? Math.round((aggregate.outputTokens / (aggregate.generationMs / 1000)) * 100) / 100
+              : null,
+        };
+      });
+      setData({ ...json, providers, models });
       setError(null);
       setLastRefresh(new Date());
     } catch (err) {
       setError(err instanceof Error ? err.message : t("unknownError"));
     }
-  }, [t]);
+  }, [t, tpsWindowHours]);
 
   useEffect(() => {
     // Async continuation — see react-hooks/set-state-in-effect.
@@ -140,6 +202,12 @@ export default function ProviderStatsPage() {
       )
     : 0;
   const activeProviders = data?.providers.length ?? 0;
+  const tpsLabel =
+    tpsWindowHours === 87600
+      ? "TPS (всего)"
+      : tpsWindowHours === 168
+        ? "TPS (7 дней)"
+        : "TPS (24 ч)";
 
   // Sorted providers
   const sortedProviders = [...(data?.providers ?? [])].sort((a, b) => {
@@ -193,19 +261,36 @@ export default function ProviderStatsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-end gap-3">
-        {lastRefresh && (
-          <span className="text-xs text-text-muted">
-            {t("updated", { time: lastRefresh.toLocaleTimeString() })}
-          </span>
-        )}
-        <button
-          onClick={fetchData}
-          className="p-2 rounded-lg bg-surface hover:bg-surface/80 text-text-muted hover:text-text-main transition-colors"
-          title={t("refresh")}
-        >
-          <span className="material-symbols-outlined text-[18px]">refresh</span>
-        </button>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-1 rounded-lg bg-surface p-1">
+          {[87600, 168, 24].map((hours) => (
+            <button
+              key={hours}
+              onClick={() => setTpsWindowHours(hours)}
+              className={
+                hours === tpsWindowHours
+                  ? "px-2 py-1 rounded-md text-xs bg-primary/15 text-primary"
+                  : "px-2 py-1 rounded-md text-xs text-text-muted hover:text-text-main"
+              }
+            >
+              {hours === 87600 ? "TPS всего" : hours === 168 ? "TPS 7 дней" : "TPS 24 часа"}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center justify-end gap-3">
+          {lastRefresh && (
+            <span className="text-xs text-text-muted">
+              {t("updated", { time: lastRefresh.toLocaleTimeString() })}
+            </span>
+          )}
+          <button
+            onClick={fetchData}
+            className="p-2 rounded-lg bg-surface hover:bg-surface/80 text-text-muted hover:text-text-main transition-colors"
+            title={t("refresh")}
+          >
+            <span className="material-symbols-outlined text-[18px]">refresh</span>
+          </button>
+        </div>
       </div>
 
       {/* Summary Cards */}
@@ -294,6 +379,13 @@ export default function ProviderStatsPage() {
                 </th>
                 <th
                   className="text-right py-2 px-3 text-text-muted font-medium cursor-pointer hover:text-text-main transition-colors select-none"
+                  onClick={() => handleSort("avgTokensPerSecond")}
+                >
+                  {tpsLabel}{" "}
+                  <SortIcon column="avgTokensPerSecond" sortKey={sortKey} sortDir={sortDir} />
+                </th>
+                <th
+                  className="text-right py-2 px-3 text-text-muted font-medium cursor-pointer hover:text-text-main transition-colors select-none"
                   onClick={() => handleSort("totalTokensIn")}
                 >
                   {t("tokensIn")}{" "}
@@ -364,6 +456,9 @@ export default function ProviderStatsPage() {
                       <td className="py-2.5 px-3 text-right tabular-nums text-text-main">
                         {formatLatency(p.avgLatencyMs)}
                       </td>
+                      <td className="py-2.5 px-3 text-right tabular-nums text-text-main">
+                        {formatTps(p.avgTokensPerSecond)}
+                      </td>
                       <td className="py-2.5 px-3 text-right tabular-nums text-text-muted">
                         {formatNumber(p.totalTokensIn)}
                       </td>
@@ -390,7 +485,7 @@ export default function ProviderStatsPage() {
                     </tr>
                     {isExpanded && models.length > 0 && (
                       <tr key={`${p.provider}-models`}>
-                        <td colSpan={10} className="p-0">
+                        <td colSpan={11} className="p-0">
                           <div className="bg-black/[0.02] dark:bg-white/[0.02] border-b border-border/30">
                             <table className="w-full text-xs">
                               <thead>
@@ -410,6 +505,7 @@ export default function ProviderStatsPage() {
                                   <th className="text-right py-1.5 px-3 font-medium">
                                     {t("avgLatency")}
                                   </th>
+                                  <th className="text-right py-1.5 px-3 font-medium">{tpsLabel}</th>
                                   <th className="px-3 w-8" />
                                 </tr>
                               </thead>
@@ -444,6 +540,9 @@ export default function ProviderStatsPage() {
                                       <td className="py-1.5 px-3 text-right tabular-nums text-text-main">
                                         {formatLatency(m.avgLatencyMs)}
                                       </td>
+                                      <td className="py-1.5 px-3 text-right tabular-nums text-text-main">
+                                        {formatTps(m.avgTokensPerSecond)}
+                                      </td>
                                       <td className="px-3 w-8" />
                                     </tr>
                                   );
@@ -459,7 +558,7 @@ export default function ProviderStatsPage() {
               })}
               {sortedProviders.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="py-8 text-center text-text-muted">
+                  <td colSpan={11} className="py-8 text-center text-text-muted">
                     {t("noProviderData")}
                   </td>
                 </tr>

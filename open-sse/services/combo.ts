@@ -595,14 +595,17 @@ export async function buildAutoCandidates(
         statusPenaltyReason = connectionStatusReason;
       }
       if (fetcher && target.connectionId) {
-        const quotaKey = `${provider}:${target.connectionId}`;
+        const quotaKey = `${provider}:${target.connectionId}:${target.modelStr.toLowerCase()}`;
         if (!quotaPromises.has(quotaKey)) {
           quotaPromises.set(
             quotaKey,
             fetchResetAwareQuotaWithCache({
               provider,
               connectionId: target.connectionId,
-              connection,
+              connection: connection
+                ? { ...connection, requestedModel: target.modelStr }
+                : connection,
+              requestedModel: target.modelStr,
               fetcher,
               config: resetWindowConfig,
               log: {},
@@ -1376,6 +1379,7 @@ async function handleComboChatInner({
           const quotaCutoff = await resolveQuotaExhaustionCutoffForTarget(
             provider,
             target.connectionId,
+            target.modelStr,
             resilienceSettings,
             quotaCutoffResetWindowConfig,
             combo.name,

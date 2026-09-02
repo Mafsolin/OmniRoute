@@ -9,7 +9,9 @@ const querySchema = z.object({
   windowHours: z.coerce
     .number()
     .positive()
-    .max(24 * 30)
+    // Match the maximum usage-history retention (10 years), so the dashboard's
+    // "TPS всего" view is not silently capped at one year.
+    .max(24 * 3650)
     .optional(),
   minSamples: z.coerce.number().int().positive().optional(),
   maxRows: z.coerce.number().int().positive().max(50000).optional(),

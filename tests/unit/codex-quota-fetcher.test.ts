@@ -175,6 +175,189 @@ test("fetchCodexQuota evaluates normal and Spark windows independently by reques
   invalidateCodexQuotaCache(connectionId);
 });
 
+test("fetchCodexQuota switches Luna to an available gpt-reserve window after the primary limit", async () => {
+  const connectionId = `codex-luna-reserve-${Date.now()}`;
+  let calls = 0;
+
+  registerCodexConnection(connectionId, { accessToken: "access-token-luna" });
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response(
+      JSON.stringify({
+        rate_limit: {
+          limit_reached: true,
+          primary_window: { used_percent: 100, reset_after_seconds: 300 },
+          secondary_window: { used_percent: 20, reset_after_seconds: 600 },
+        },
+        additional_rate_limits: [
+          {
+            limit_name: "gpt-reserve",
+            metered_feature: "base_model_inference",
+            rate_limit: {
+              primary_window: { used_percent: 0, reset_after_seconds: 3600 },
+            },
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  };
+
+  const luna = await fetchCodexQuota(connectionId, { requestedModel: "gpt-5.6-luna" });
+  const sol = await fetchCodexQuota(connectionId, { requestedModel: "gpt-5.6-sol" });
+
+  assert.equal(calls, 2, "Luna and Sol must not share a reserve-aware cache entry");
+  assert.equal(luna?.usingLunaReserve, true);
+  assert.equal(luna?.lunaReserveAvailable, true);
+  assert.equal(luna?.windows?.session.percentUsed, 0);
+  assert.equal(luna?.window7d.percentUsed, 0.2);
+  assert.equal(luna?.windows?.weekly.percentUsed, 0.2);
+  assert.equal(luna?.allWindows?.["gpt-reserve"]?.percentUsed, 0);
+  assert.equal(luna?.limitReached, false);
+  assert.equal(sol?.usingLunaReserve, false);
+  assert.equal(sol?.windows?.session.percentUsed, 1);
+
+  invalidateCodexQuotaCache(connectionId);
+});
+
+test("fetchCodexQuota keeps Luna blocked when the reserve window is exhausted", async () => {
+  const connectionId = `codex-luna-reserve-exhausted-${Date.now()}`;
+  registerCodexConnection(connectionId, { accessToken: "access-token-luna-exhausted" });
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        rate_limit: {
+          limit_reached: true,
+          primary_window: { used_percent: 100, reset_after_seconds: 300 },
+        },
+        additional_rate_limits: [
+          {
+            limit_name: "gpt-reserve",
+            rate_limit: {
+              primary_window: { used_percent: 100, reset_after_seconds: 3600 },
+            },
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+
+  const quota = await fetchCodexQuota(connectionId, { requestedModel: "gpt-5.6-luna" });
+
+  assert.equal(quota?.usingLunaReserve, false);
+  assert.equal(quota?.lunaReserveAvailable, false);
+  assert.equal(quota?.limitReached, true);
+  assert.equal(quota?.windows?.session.percentUsed, 1);
+  invalidateCodexQuotaCache(connectionId);
+});
+
+test("fetchCodexQuota keeps the regular weekly window active while Luna uses reserve", async () => {
+  const connectionId = `codex-luna-reserve-weekly-${Date.now()}`;
+  registerCodexConnection(connectionId, { accessToken: "access-token-luna-weekly" });
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        rate_limit: {
+          limit_reached: true,
+          primary_window: { used_percent: 100, reset_after_seconds: 300 },
+          secondary_window: { used_percent: 100, reset_after_seconds: 600 },
+        },
+        additional_rate_limits: [
+          {
+            limit_name: "gpt-reserve",
+            rate_limit: { primary_window: { used_percent: 0, reset_after_seconds: 3600 } },
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+
+  const quota = await fetchCodexQuota(connectionId, { requestedModel: "gpt-5.6-luna" });
+
+  assert.equal(quota?.usingLunaReserve, false, "weekly exhaustion must remain authoritative");
+  assert.equal(quota?.windows?.session.percentUsed, 1);
+  invalidateCodexQuotaCache(connectionId);
+});
+
+test("Codex preflight still applies a near-exhausted weekly window during Luna reserve", async () => {
+  const connectionId = `codex-luna-reserve-weekly-cutoff-${Date.now()}`;
+  registerCodexQuotaFetcher();
+  registerCodexConnection(connectionId, { accessToken: "access-token-luna-weekly-cutoff" });
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        rate_limit: {
+          limit_reached: true,
+          primary_window: { used_percent: 100, reset_after_seconds: 300 },
+          secondary_window: { used_percent: 99, reset_after_seconds: 600 },
+        },
+        additional_rate_limits: [
+          {
+            limit_name: "gpt-reserve",
+            rate_limit: { primary_window: { used_percent: 0, reset_after_seconds: 3600 } },
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+
+  const result = await preflightQuota(
+    "codex",
+    connectionId,
+    { requestedModel: "gpt-5.6-luna" },
+    { resolveMinRemainingPercent: () => 2 }
+  );
+
+  assert.equal(result.proceed, false);
+  assert.equal(result.reason, "quota_exhausted");
+  invalidateCodexQuotaCache(connectionId);
+});
+
+test("Codex preflight allows Luna reserve but still blocks Sol on the exhausted regular window", async () => {
+  const connectionId = `codex-luna-reserve-preflight-${Date.now()}`;
+  registerCodexQuotaFetcher();
+  registerCodexConnection(connectionId, { accessToken: "access-token-luna-preflight" });
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        rate_limit: {
+          limit_reached: true,
+          primary_window: { used_percent: 100, reset_after_seconds: 300 },
+        },
+        additional_rate_limits: [
+          {
+            limit_name: "gpt-reserve",
+            rate_limit: {
+              primary_window: { used_percent: 0, reset_after_seconds: 3600 },
+            },
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+
+  const thresholds = {
+    resolveMinRemainingPercent: () => 2,
+    resolveWarnRemainingPercent: () => 20,
+  };
+  const luna = await preflightQuota(
+    "codex",
+    connectionId,
+    { requestedModel: "gpt-5.6-luna" },
+    thresholds
+  );
+  const sol = await preflightQuota(
+    "codex",
+    connectionId,
+    { requestedModel: "gpt-5.6-sol" },
+    thresholds
+  );
+
+  assert.equal(luna.proceed, true);
+  assert.equal(sol.proceed, false);
+  invalidateCodexQuotaCache(connectionId);
+});
+
 test("fetchCodexQuota drops bad credentials after an authorization failure", async () => {
   const connectionId = `codex-auth-${Date.now()}`;
   let calls = 0;
