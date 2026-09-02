@@ -67,6 +67,13 @@ interface ImageCatalogModelEntry {
 }
 
 const IMAGE_MODEL_ALIASES: Record<string, ImageModelAliasEntry> = {
+  "gpt-image-2": {
+    provider: "codex",
+    model: "gpt-image-2",
+    name: "GPT Image 2 (Codex OAuth)",
+    listInCatalog: true,
+    inputModalities: ["text", "image"],
+  },
   "gemini-3.1-flash-image-preview": {
     provider: "antigravity",
     model: "gemini-3.1-flash-image",
@@ -230,6 +237,7 @@ export const IMAGE_PROVIDERS: Record<string, ImageProviderConfig> = {
     authHeader: "bearer",
     format: "codex-responses",
     models: [
+      { id: "gpt-image-2", name: "GPT Image 2 (Codex OAuth)", inputModalities: ["text", "image"] },
       { id: "gpt-5.6-sol", name: "GPT 5.6 Sol (Codex Image)" },
       { id: "gpt-5.6-terra", name: "GPT 5.6 Terra (Codex Image)" },
       { id: "gpt-5.6-luna", name: "GPT 5.6 Luna (Codex Image)" },
