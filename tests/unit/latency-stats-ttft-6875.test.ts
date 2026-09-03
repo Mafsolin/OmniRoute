@@ -76,6 +76,40 @@ test("getModelLatencyStats aggregates avgTtftMs/avgE2ELatencyMs and weighted pos
   assert.equal(entry.tpsSampleCount, 3);
 });
 
+test("getModelLatencyStats excludes invalid post-TTFT intervals from TPS but keeps latency", async () => {
+  await usageHistory.saveRequestUsage({
+    provider: "invalid-ttft-provider",
+    model: "invalid-ttft-model",
+    success: true,
+    latencyMs: 1000,
+    timeToFirstTokenMs: 1000,
+    tokens: { output: 999 },
+    timestamp: new Date().toISOString(),
+  });
+  await usageHistory.saveRequestUsage({
+    provider: "invalid-ttft-provider",
+    model: "invalid-ttft-model",
+    success: true,
+    latencyMs: 2000,
+    timeToFirstTokenMs: 500,
+    tokens: { output: 100 },
+    timestamp: new Date(Date.now() - 60 * 1000).toISOString(),
+  });
+
+  const stats = await usageHistory.getModelLatencyStats({
+    windowHours: 1,
+    minSamples: 1,
+  });
+
+  const entry = stats["invalid-ttft-provider/invalid-ttft-model"];
+  assert.ok(entry);
+  assert.equal(entry.avgLatencyMs, 1500);
+  assert.equal(entry.avgTokensPerSecond, 66.67);
+  assert.equal(entry.tpsOutputTokens, 100);
+  assert.equal(entry.tpsGenerationMs, 1500);
+  assert.equal(entry.tpsSampleCount, 1);
+});
+
 test("getModelLatencyStats guards divide-by-zero when latency_ms <= 0 for tokens/sec", async () => {
   await usageHistory.saveRequestUsage({
     provider: "zero-latency-provider",
