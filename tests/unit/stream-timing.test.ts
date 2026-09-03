@@ -127,7 +127,10 @@ test("forward wall-clock jump does not inflate TTFT (monotonic clock)", () => {
     t.markForward();
     const ttft = t.ttftMs();
     // Real elapsed is sub-millisecond; a Date.now-based seam would report ~5000.
-    assert.ok(ttft !== null && ttft >= 0 && ttft < 1_000, `ttft must ignore +5s wall jump, got ${ttft}`);
+    assert.ok(
+      ttft !== null && ttft >= 0 && ttft < 1_000,
+      `ttft must ignore +5s wall jump, got ${ttft}`
+    );
   });
 });
 
@@ -140,7 +143,10 @@ test("backward wall-clock jump does not yield negative TTFT (monotonic clock)", 
     const ttft = t.ttftMs();
     // A Date.now-based seam would report ~-2000, silently discarded downstream
     // by the `ttft >= 0` guard (invisible data loss).
-    assert.ok(ttft !== null && ttft >= 0 && ttft < 1_000, `ttft must never go negative, got ${ttft}`);
+    assert.ok(
+      ttft !== null && ttft >= 0 && ttft < 1_000,
+      `ttft must never go negative, got ${ttft}`
+    );
   });
 });
 
@@ -154,4 +160,52 @@ test("wall-clock jump does not corrupt inter-chunk ITL (monotonic clock)", () =>
     // A Date.now-based seam would record a 3000ms gap; monotonic stays near 0.
     assert.ok(itl !== null && itl >= 0 && itl < 1_000, `itl must ignore +3s wall jump, got ${itl}`);
   });
+});
+
+// TTFT regression: scaffolding must not be mistaken for the first token.
+//
+// The streaming path forwards protocol frames (`response.created`, SSE
+// metadata comments, keepalives) within a few ms of the request, long before
+// the model emits anything. Marking TTFT on the first FORWARD therefore
+// reported ~10ms TTFT against a 12s latency on live traffic (896 rows in one
+// day on the production DB), which also poisons the TPS/decode-rate
+// derivation that divides output tokens by `latency - ttft`.
+test("ttft() measures the first GENERATED chunk, not forwarded scaffolding", async () => {
+  const t = createStreamTiming();
+  t.markByte();
+  t.markForward(); // `response.created` — scaffolding, forwarded immediately
+  await new Promise((r) => setTimeout(r, 25));
+  t.markGeneratedOutput(); // first real token, 25ms later
+  t.markForward();
+  const ttft = t.ttftMs();
+  assert.ok(
+    ttft !== null && ttft >= 25 - TIMER_SLACK_MS,
+    `ttft must measure the first generated token (>=25ms), got ${ttft}`
+  );
+  assert.ok(t.firstForwardAt! < t.firstGeneratedOutputAt!, "scaffolding precedes generated output");
+});
+
+test("markGeneratedOutput() is idempotent — only the first token counts", async () => {
+  const t = createStreamTiming();
+  t.markGeneratedOutput();
+  const first = t.firstGeneratedOutputAt;
+  await new Promise((r) => setTimeout(r, 15));
+  t.markGeneratedOutput(); // later tokens must not move TTFT
+  assert.equal(t.firstGeneratedOutputAt, first, "TTFT must latch on the first generated chunk");
+});
+
+test("ttft() falls back to first-forward latency when nothing is classified", () => {
+  // A provider whose events this build cannot classify must degrade to the
+  // historical signal rather than reporting null (which downstream reads as
+  // "no data" and drops the row from latency stats entirely).
+  const t = createStreamTiming();
+  t.markForward();
+  const ttft = t.ttftMs();
+  assert.ok(ttft !== null && ttft >= 0, `expected fallback to first-forward, got ${ttft}`);
+});
+
+test("ttft() is null when neither generated output nor a forward happened", () => {
+  const t = createStreamTiming();
+  t.markByte();
+  assert.equal(t.ttftMs(), null);
 });
