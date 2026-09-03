@@ -249,7 +249,7 @@ test("keeps OmniRoute DATA_DIR isolation and Docker CDP browser ownership", () =
     else process.env.DATA_DIR = previousDataDir;
     if (previousDedicatedHome === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME;
     else process.env.CODEX_CHATGPT_WEB_HOME = previousDedicatedHome;
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -292,7 +292,7 @@ test("verified capability refresh preserves the credential marker binding", () =
     assert.equal(marker.proAvailable, false);
     assert.match(String(marker.storageStateFingerprint), /^[a-f0-9]{64}$/);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -326,7 +326,7 @@ test("cookie-header storage state satisfies Playwright cookie requirements", () 
   } finally {
     if (previousDataDir === undefined) delete process.env.DATA_DIR;
     else process.env.DATA_DIR = previousDataDir;
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -804,7 +804,7 @@ test("forced previous_response_id state flushes immediately and reloads after an
     resetResponseStateForTests();
     if (previousHome === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME;
     else process.env.CODEX_CHATGPT_WEB_HOME = previousHome;
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -851,7 +851,7 @@ test("concurrent response-state writers merge their snapshots instead of overwri
     writerB.resetResponseStateForTests();
     if (previousHome === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME;
     else process.env.CODEX_CHATGPT_WEB_HOME = previousHome;
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -903,7 +903,7 @@ test("large attachment response state survives a separate isolate", async () => 
     reader.resetResponseStateForTests();
     if (previousHome === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME;
     else process.env.CODEX_CHATGPT_WEB_HOME = previousHome;
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -924,7 +924,7 @@ test("namespaced continuations reject legacy state without a namespace", () => {
     resetResponseStateForTests();
     if (previousHome === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME;
     else process.env.CODEX_CHATGPT_WEB_HOME = previousHome;
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
