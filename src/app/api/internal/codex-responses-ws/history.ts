@@ -72,6 +72,17 @@ function getServiceTier(requestBody: JsonRecord): string | null {
   return toStringOrNull(requestBody.service_tier) || toStringOrNull(requestBody.serviceTier);
 }
 
+export function resolveResponsesWsCallLogId(body: JsonRecord): string | undefined {
+  return toStringOrNull(body.callLogId) || toStringOrNull(body.sessionId) || undefined;
+}
+
+export function resolveResponsesWsTtftMs(body: JsonRecord, durationMs: number): number {
+  const boundedDurationMs = Math.max(0, Math.round(toFiniteNumber(durationMs, 0)));
+  const rawTtftMs = Number(body.ttftMs);
+  if (!Number.isFinite(rawTtftMs)) return boundedDurationMs;
+  return Math.min(boundedDurationMs, Math.max(0, Math.round(rawTtftMs)));
+}
+
 function getAuthRequest(body: JsonRecord): Request {
   const requestUrl = typeof body.requestUrl === "string" ? body.requestUrl : "/api/v1/responses";
   const headers = isRecord(body.headers) ? body.headers : {};
@@ -89,6 +100,7 @@ async function getApiKeyMetadataFromBody(body: JsonRecord) {
 }
 
 type ResponsesWsHistoryContext = {
+  callLogId: string | null;
   metadata: ApiKeyMetadata | null;
   requestBody: JsonRecord;
   terminalMessage: JsonRecord | null;
@@ -100,6 +112,7 @@ type ResponsesWsHistoryContext = {
   errorMessage: string | null;
   timestamp: string;
   durationMs: number;
+  ttftMs: number;
   provider: string;
   model: string;
   requestedModel: string | null;
@@ -146,6 +159,7 @@ async function buildHistoryContext(body: JsonRecord): Promise<ResponsesWsHistory
   const outcome = resolveOutcome(body, getErrorRecord(body, responseBody));
   const timestamp = getTimestamp(body.startedAt);
   const durationMs = Math.max(0, Math.round(toFiniteNumber(body.durationMs, 0)));
+  const ttftMs = resolveResponsesWsTtftMs(body, durationMs);
   const provider = toStringOrNull(body.provider) || "codex";
   const model =
     toStringOrNull(body.model) ||
@@ -155,7 +169,9 @@ async function buildHistoryContext(body: JsonRecord): Promise<ResponsesWsHistory
   const requestedModel = toStringOrNull(body.requestedModel) || toStringOrNull(requestBody.model);
   const connectionId = toStringOrNull(body.connectionId);
   const path = getRequestPath(body);
+  const callLogId = toStringOrNull(body.callLogId);
   return {
+    callLogId,
     metadata,
     requestBody,
     terminalMessage,
@@ -164,6 +180,7 @@ async function buildHistoryContext(body: JsonRecord): Promise<ResponsesWsHistory
     ...outcome,
     timestamp,
     durationMs,
+    ttftMs,
     provider,
     model,
     requestedModel,
@@ -180,8 +197,13 @@ async function buildHistoryContext(body: JsonRecord): Promise<ResponsesWsHistory
 }
 
 function buildCallLogEntry(body: JsonRecord, context: ResponsesWsHistoryContext): JsonRecord {
+  const responseId =
+    toStringOrNull(context.responseBody?.id) ||
+    toStringOrNull(context.terminalMessage?.response?.id);
   return {
-    id: toStringOrNull(body.sessionId) || undefined,
+    // New proxy payloads carry a unique ID for every logical turn. Keep the
+    // session ID fallback for older standalone proxies during rolling deploys.
+    id: resolveResponsesWsCallLogId(body),
     timestamp: context.timestamp,
     method: "WEBSOCKET",
     path: context.path,
@@ -191,6 +213,7 @@ function buildCallLogEntry(body: JsonRecord, context: ResponsesWsHistoryContext)
     provider: context.provider,
     connectionId: context.connectionId,
     duration: context.durationMs,
+    ttftMs: context.ttftMs,
     tokens: context.usage,
     requestType: "responses_websocket",
     sourceFormat: context.sourceFormat,
@@ -200,6 +223,7 @@ function buildCallLogEntry(body: JsonRecord, context: ResponsesWsHistoryContext)
     noLog: context.noLog,
     requestBody: context.requestBody,
     responseBody: context.responseBody ?? context.terminalMessage,
+    responseId,
     error: context.errorMessage ? { code: context.errorCode, message: context.errorMessage } : null,
     pipelinePayloads: {
       ...(isRecord(body.reasoningRouting) ? { routeDecision: body.reasoningRouting } : {}),
@@ -224,7 +248,7 @@ function buildUsageEntry(context: ResponsesWsHistoryContext): JsonRecord {
     status: String(context.status),
     success: context.success,
     latencyMs: context.durationMs,
-    timeToFirstTokenMs: context.durationMs,
+    timeToFirstTokenMs: context.ttftMs,
     errorCode: context.errorCode,
     endpoint: "/v1/responses",
   };

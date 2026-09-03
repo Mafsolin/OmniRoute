@@ -60,10 +60,9 @@ export interface LatencySampleBuckets {
 
 /**
  * Push one usage_history row's latency/TTFT/tokens-per-second sample into the
- * accumulator buckets. Guards divide-by-zero by only deriving a tokens/sec
- * sample when both latencyMs and tokensOutput are positive; rows with
- * latencyMs <= 0 are skipped entirely, mirroring the pre-existing
- * allLatencies/successfulLatencies guard.
+ * accumulator buckets. TPS measures only the decode phase (end-to-end latency
+ * minus TTFT); rows without a positive decode interval or output token count
+ * stay valid for latency/TTFT statistics but do not contribute to TPS.
  */
 export function accumulateLatencySample(
   buckets: LatencySampleBuckets,
@@ -75,11 +74,16 @@ export function accumulateLatencySample(
   if (latencyMs <= 0) return;
   buckets.allLatencies.push(latencyMs);
   if (ttftMs > 0) buckets.allTtfts.push(ttftMs);
-  if (tokensOutput > 0) buckets.allTps.push(tokensOutput / (latencyMs / 1000));
+  const generationMs = latencyMs - ttftMs;
+  if (generationMs > 0 && tokensOutput > 0) {
+    buckets.allTps.push(tokensOutput / (generationMs / 1000));
+  }
   if (!isSuccess) return;
   buckets.successfulLatencies.push(latencyMs);
   if (ttftMs > 0) buckets.successfulTtfts.push(ttftMs);
-  if (tokensOutput > 0) buckets.successfulTps.push(tokensOutput / (latencyMs / 1000));
+  if (generationMs > 0 && tokensOutput > 0) {
+    buckets.successfulTps.push(tokensOutput / (generationMs / 1000));
+  }
 }
 
 /** Per-provider/model accumulator for getModelLatencyStats() (#6875). */
@@ -127,7 +131,7 @@ export interface ModelLatencyStatsEntry {
    * already represents the full request wall-clock time (#6875).
    */
   avgE2ELatencyMs: number;
-  /** Mean output tokens/sec across successful rows (tokens_output / (latency_ms/1000)). */
+  /** Mean output tokens/sec across successful rows, excluding TTFT. */
   avgTokensPerSecond: number;
 }
 

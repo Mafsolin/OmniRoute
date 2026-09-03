@@ -125,6 +125,15 @@ test("#7388: a reused Responses WebSocket connection logs both of two logical tu
       setTimeout(() => {
         fakeUpstream.onmessage?.({
           data: JSON.stringify({
+            type: "response.output_text.delta",
+            response: { id: `resp_${currentTurn}` },
+            delta: `pong${currentTurn}`,
+          }),
+        });
+      }, 5);
+      setTimeout(() => {
+        fakeUpstream.onmessage?.({
+          data: JSON.stringify({
             type: "response.completed",
             response: {
               id: `resp_${currentTurn}`,
@@ -138,7 +147,7 @@ test("#7388: a reused Responses WebSocket connection logs both of two logical tu
             },
           }),
         });
-      }, 10);
+      }, 35);
     },
     close() {},
     onmessage: null as ((event: { data: string }) => void) | null,
@@ -184,6 +193,11 @@ test("#7388: a reused Responses WebSocket connection logs both of two logical tu
       () => downstreamMessages.filter((entry) => entry.type === "response.completed").length === 1
     );
 
+    // Make the second logical turn observably later than the first one. The
+    // WebSocket remains open, so a connection-scoped timestamp would still be
+    // identical and fail the assertions below.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
     // Turn 2 on the SAME WebSocket connection (client reuse), per the issue's
     // repro: "Codex clients may reuse one WebSocket connection for multiple
     // logical turns."
@@ -202,10 +216,7 @@ test("#7388: a reused Responses WebSocket connection logs both of two logical tu
 
     // Both logical turns completed downstream — confirms the repro precondition
     // from the issue ("The WebSocket received two terminal events").
-    assert.equal(
-      upstreamSends.filter((entry) => entry.type === "response.create").length,
-      2
-    );
+    assert.equal(upstreamSends.filter((entry) => entry.type === "response.create").length, 2);
     assert.equal(
       downstreamMessages.filter((entry) => entry.type === "response.completed").length,
       2
@@ -225,8 +236,43 @@ test("#7388: a reused Responses WebSocket connection logs both of two logical tu
         "second turn's history/usage was dropped by the session-level historyLogged guard (#7388)"
     );
 
+    assert.equal(logRequests[0].sessionId, logRequests[1].sessionId);
+    assert.equal(typeof logRequests[0].callLogId, "string");
+    assert.equal(typeof logRequests[1].callLogId, "string");
+    assert.notEqual(
+      logRequests[0].callLogId,
+      logRequests[1].callLogId,
+      "each logical turn must persist under a distinct call-log id"
+    );
+
+    const firstStartedAt = Date.parse(String(logRequests[0].startedAt));
+    const secondStartedAt = Date.parse(String(logRequests[1].startedAt));
+    assert.ok(Number.isFinite(firstStartedAt));
+    assert.ok(Number.isFinite(secondStartedAt));
+    assert.ok(
+      secondStartedAt > firstStartedAt,
+      "each logical turn must use its own start timestamp, not the WebSocket handshake time"
+    );
+
+    for (const entry of logRequests) {
+      assert.equal(typeof entry.durationMs, "number");
+      assert.ok(Number(entry.durationMs) >= 0);
+      assert.ok(
+        Number(entry.durationMs) < 1000,
+        "logical-turn duration must not accumulate the lifetime of the reused WebSocket"
+      );
+      assert.equal(typeof entry.ttftMs, "number");
+      assert.ok(Number(entry.ttftMs) >= 0);
+      assert.ok(
+        Number(entry.ttftMs) < Number(entry.durationMs),
+        "TTFT must measure first generated output, not the full response duration"
+      );
+    }
+
     const respIds = logRequests
-      .map((entry) => (entry.terminalMessage as { response?: { id?: string } } | null)?.response?.id)
+      .map(
+        (entry) => (entry.terminalMessage as { response?: { id?: string } } | null)?.response?.id
+      )
       .sort();
     assert.deepEqual(
       respIds,

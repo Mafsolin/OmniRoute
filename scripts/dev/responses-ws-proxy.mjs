@@ -31,9 +31,6 @@ const WS_QUERY_TOKEN_KEYS = ["api_key", "token", "access_token"];
 const textDecoder = new TextDecoder();
 const DEFAULT_MAX_WS_BUFFER_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_WS_MESSAGE_BYTES = 16 * 1024 * 1024;
-// #7388: sentinel turn key for session-ending terminal events that don't carry
-// a `response.id` (prepare failure, upstream error/close, connect failure).
-const SESSION_TERMINAL_TURN_KEY = "__session_terminal__";
 
 class WebSocketInputTooLargeError extends Error {
   constructor(message, reason = "message_too_large") {
@@ -351,6 +348,68 @@ function getResponseCreatePayload(message) {
   return payload;
 }
 
+function getResponseId(message) {
+  if (!isRecord(message)) return null;
+  return (
+    (isRecord(message.response) && toStringOrNull(message.response.id)) ||
+    toStringOrNull(message.response_id) ||
+    toStringOrNull(message.responseId)
+  );
+}
+
+function hasGeneratedText(value) {
+  if (typeof value === "string") return value.length > 0;
+  if (Array.isArray(value)) return value.some((item) => hasGeneratedText(item));
+  if (!isRecord(value)) return false;
+  return [
+    "text",
+    "output_text",
+    "thinking",
+    "reasoning",
+    "reasoning_content",
+    "content",
+    "arguments",
+  ].some((key) => hasGeneratedText(value[key]));
+}
+
+/** Detect the first real model output event without changing or filtering it. */
+function isGeneratedOutputMessage(value) {
+  const message = parseJsonRecord(value);
+  if (!message) return false;
+  const type = toStringOrNull(message.type) || "";
+  if (type === "response.created" || type === "response.completed" || type === "response.done") {
+    return false;
+  }
+
+  if (type.endsWith(".delta")) {
+    if (typeof message.delta === "string" && message.delta.length > 0) return true;
+    if (isRecord(message.delta)) {
+      return ["text", "content", "thinking", "reasoning_content"].some(
+        (key) => typeof message.delta[key] === "string" && message.delta[key].length > 0
+      );
+    }
+  }
+
+  if (type === "response.output_item.added" || type === "response.output_item.done") {
+    const item = isRecord(message.item) ? message.item : null;
+    if (!item) return false;
+    if (item.type === "function_call") {
+      return (
+        (typeof item.name === "string" && item.name.length > 0) ||
+        (typeof item.arguments === "string" && item.arguments.length > 0)
+      );
+    }
+    if (item.type === "message") return hasGeneratedText(item.content);
+  }
+
+  if (type === "response.content_part.added" || type === "response.content_part.done") {
+    const part = isRecord(message.part) ? message.part : null;
+    return part?.type === "output_text" && typeof part.text === "string" && part.text.length > 0;
+  }
+
+  return false;
+}
+
 function withPreparedResponseCreate(message, preparedBody) {
   const next = { ...message };
   if (
@@ -418,7 +477,6 @@ class ResponsesWsSession {
     this.maxBufferBytes = normalizePositiveInteger(maxBufferBytes, DEFAULT_MAX_WS_BUFFER_BYTES);
     this.maxMessageBytes = normalizePositiveInteger(maxMessageBytes, DEFAULT_MAX_WS_MESSAGE_BYTES);
     this.sessionId = randomUUID();
-    this.startedAt = Date.now();
     this.closed = false;
     this.buffer = Buffer.alloc(0);
     this.fragmentOpcode = null;
@@ -427,17 +485,16 @@ class ResponsesWsSession {
     this.processing = Promise.resolve();
     this.upstream = null;
     this.upstreamReady = null;
-    this.firstResponseBody = null;
-    this.currentRequestBody = null;
-    this.preparedContext = null;
+    this.pendingTurns = [];
+    this.turnsByResponseId = new Map();
     // #7388: logging must be scoped per logical turn (one `response.create`
     // through its terminal event), not once for the lifetime of the WS
     // connection — a single boolean here silently dropped every turn after
     // the first on a reused connection. Terminal events carry a
-    // `response.id` we can key on; session-ending failure paths (prepare
-    // failure, upstream error/close, connect failure) don't, so they fall
-    // back to a session-scoped sentinel key that still logs exactly once.
+    // `response.id` we can key on; the logical turn object is the fallback
+    // for failure paths without an id.
     this.loggedTurnIds = new Set();
+    this.claimedTurnIds = new Set();
     this.lastSeenAt = Date.now();
 
     this.pingTimer = setInterval(() => {
@@ -495,6 +552,73 @@ class ResponsesWsSession {
     const payload = buildFailurePayload(code, message);
     this.sendJson(payload);
     return payload;
+  }
+
+  beginTurn(requestBody) {
+    const turn = {
+      callLogId: randomUUID(),
+      requestBody,
+      startedAt: Date.now(),
+      completedAt: null,
+      firstOutputAt: null,
+      preparedContext: null,
+      responseId: null,
+    };
+    this.pendingTurns.push(turn);
+    return turn;
+  }
+
+  associateResponseId(responseId) {
+    if (!responseId || this.turnsByResponseId.has(responseId)) return;
+    const turn = this.pendingTurns.find((candidate) => !candidate.responseId);
+    if (!turn) return;
+    turn.responseId = responseId;
+    this.turnsByResponseId.set(responseId, turn);
+  }
+
+  removeTurn(turn) {
+    const index = this.pendingTurns.indexOf(turn);
+    if (index >= 0) this.pendingTurns.splice(index, 1);
+    if (turn.responseId && this.turnsByResponseId.get(turn.responseId) === turn) {
+      this.turnsByResponseId.delete(turn.responseId);
+    }
+  }
+
+  claimTurn(turn, terminalMessage = null) {
+    if (turn?.claimed) return null;
+
+    const responseId = getResponseId(terminalMessage);
+    if (responseId && this.claimedTurnIds.has(responseId)) return null;
+
+    const resolvedTurn =
+      turn ||
+      (responseId ? this.turnsByResponseId.get(responseId) : null) ||
+      this.pendingTurns[0] ||
+      null;
+    if (!resolvedTurn) return null;
+
+    if (responseId) {
+      resolvedTurn.responseId = responseId;
+      this.turnsByResponseId.set(responseId, resolvedTurn);
+      this.claimedTurnIds.add(responseId);
+    }
+    resolvedTurn.claimed = true;
+    this.removeTurn(resolvedTurn);
+    return resolvedTurn;
+  }
+
+  markGeneratedOutput(turn, timestamp = Date.now()) {
+    if (turn && turn.firstOutputAt === null) turn.firstOutputAt = timestamp;
+  }
+
+  getTurnTiming(turn, finishedAt = Date.now()) {
+    const startedAt = Number.isFinite(turn?.startedAt) ? turn.startedAt : finishedAt;
+    const durationMs = Math.max(0, finishedAt - startedAt);
+    const ttftMs =
+      turn?.firstOutputAt === null || !Number.isFinite(turn?.firstOutputAt)
+        ? durationMs
+        : Math.max(0, Math.min(durationMs, turn.firstOutputAt - startedAt));
+    return { startedAt, durationMs, ttftMs };
   }
 
   async onData(chunk) {
@@ -595,7 +719,7 @@ class ResponsesWsSession {
   // "prepare" action — auth/policy/memory/reasoning-routing/compression — and refreshes
   // preparedContext, but never touches this.upstream/this.upstreamReady; the caller decides
   // whether a new upstream socket is needed.
-  async runPrepare(message, responseBody) {
+  async runPrepare(message, responseBody, turn) {
     const prepared = await callInternal(
       this.fetchImpl,
       this.baseUrl,
@@ -623,7 +747,7 @@ class ResponsesWsSession {
       throw error;
     }
 
-    this.preparedContext = {
+    const preparedContext = {
       upstreamUrl: toStringOrNull(prepared.json?.upstreamUrl),
       connectionId: toStringOrNull(prepared.json?.connectionId),
       account: toStringOrNull(prepared.json?.account),
@@ -639,11 +763,12 @@ class ResponsesWsSession {
       serviceTier:
         toStringOrNull(responseBody.service_tier) || toStringOrNull(responseBody.serviceTier),
     };
+    if (turn) turn.preparedContext = preparedContext;
 
     return prepared;
   }
 
-  async ensureUpstream(firstMessage) {
+  async ensureUpstream(firstMessage, firstTurn) {
     if (this.upstreamReady) return this.upstreamReady;
 
     this.upstreamReady = (async () => {
@@ -651,10 +776,7 @@ class ResponsesWsSession {
       if (responseBody === null) {
         throw new Error("First Responses WebSocket message must be response.create");
       }
-      this.firstResponseBody ||= responseBody;
-      this.currentRequestBody = responseBody;
-
-      const prepared = await this.runPrepare(firstMessage, responseBody);
+      const prepared = await this.runPrepare(firstMessage, responseBody, firstTurn);
 
       const wsOptions = {
         // #5591: chrome_149 is not a wreq-js 2.3.1 profile (max chrome_147); the
@@ -672,9 +794,17 @@ class ResponsesWsSession {
         if (this.closed) return;
         const data =
           typeof event.data === "string" ? event.data : Buffer.from(event.data).toString("utf8");
+        const parsed = parseJsonRecord(data);
+        const responseId = getResponseId(parsed);
+        this.associateResponseId(responseId);
+        const eventTurn = responseId
+          ? this.turnsByResponseId.get(responseId)
+          : this.pendingTurns[0];
+        if (isGeneratedOutputMessage(parsed)) this.markGeneratedOutput(eventTurn);
         const terminalEvent = getTerminalResponseEvent(data);
         if (terminalEvent) {
-          void this.persistHistory(terminalEvent);
+          const turn = this.claimTurn(null, terminalEvent.terminalMessage);
+          void this.persistHistory(terminalEvent, turn);
         }
         this.sendFrame(0x1, Buffer.from(data, "utf8"));
       };
@@ -682,26 +812,34 @@ class ResponsesWsSession {
         if (this.closed) return;
         const errorMessage = event.message || "Codex upstream WebSocket error";
         const failurePayload = this.sendFailure("upstream_websocket_error", errorMessage);
-        void this.persistHistory({
-          status: 502,
-          success: false,
-          errorCode: "upstream_websocket_error",
-          errorMessage,
-          terminalMessage: failurePayload,
-        });
+        const turn = this.claimTurn();
+        void this.persistHistory(
+          {
+            status: 502,
+            success: false,
+            errorCode: "upstream_websocket_error",
+            errorMessage,
+            terminalMessage: failurePayload,
+          },
+          turn
+        );
       };
       upstream.onclose = (event) => {
         if (this.closed) return;
-        void this.persistHistory({
-          status: event.code === 1000 ? 499 : 502,
-          success: false,
-          errorCode: "upstream_websocket_closed",
-          errorMessage: event.reason || "Codex upstream WebSocket closed before completion",
-          terminalMessage: buildFailurePayload(
-            "upstream_websocket_closed",
-            event.reason || "Codex upstream WebSocket closed before completion"
-          ),
-        });
+        const turn = this.claimTurn();
+        void this.persistHistory(
+          {
+            status: event.code === 1000 ? 499 : 502,
+            success: false,
+            errorCode: "upstream_websocket_closed",
+            errorMessage: event.reason || "Codex upstream WebSocket closed before completion",
+            terminalMessage: buildFailurePayload(
+              "upstream_websocket_closed",
+              event.reason || "Codex upstream WebSocket closed before completion"
+            ),
+          },
+          turn
+        );
         this.close(event.code || 1000, event.reason || "upstream_closed");
       };
 
@@ -716,9 +854,11 @@ class ResponsesWsSession {
   }
 
   async forwardClientMessage(message) {
+    const requestBody = getResponseCreatePayload(message);
+    const turn = requestBody ? this.beginTurn(requestBody) : null;
     try {
       if (!this.upstream) {
-        const { upstream, firstMessage } = await this.ensureUpstream(message);
+        const { upstream, firstMessage } = await this.ensureUpstream(message, turn);
         upstream.send(jsonStringifySafe(firstMessage));
         return;
       }
@@ -726,14 +866,12 @@ class ResponsesWsSession {
       // turns straight through (ensureUpstream() only runs once); track each
       // turn's own request body so persistHistory() attaches the right
       // clientRequest instead of always the first turn's.
-      const nextTurnBody = getResponseCreatePayload(message);
-      if (nextTurnBody !== null) {
-        this.currentRequestBody = nextTurnBody;
+      if (requestBody !== null) {
         // #8052: a reused connection must re-run "prepare" (auth/policy/memory/
         // reasoning-routing/compression) for every logical turn, not just the first —
         // otherwise every turn after the first bypasses the whole pipeline. This reuses
         // the already-established upstream transport; it must NOT recreate the socket.
-        const prepared = await this.runPrepare(message, nextTurnBody);
+        const prepared = await this.runPrepare(message, requestBody, turn);
         this.upstream.send(
           jsonStringifySafe(withPreparedResponseCreate(message, prepared.json.response))
         );
@@ -746,71 +884,85 @@ class ResponsesWsSession {
           "responses_websocket_http_fallback",
           "Retry this request over HTTP/SSE Responses"
         );
-        void this.persistHistory({
-          status: 426,
-          success: false,
-          errorCode: "responses_websocket_http_fallback",
-          errorMessage: "HTTP/SSE Responses transport required",
-          terminalMessage: failurePayload,
-        });
+        const failedTurn = this.claimTurn(turn, failurePayload);
+        void this.persistHistory(
+          {
+            status: 426,
+            success: false,
+            errorCode: "responses_websocket_http_fallback",
+            errorMessage: "HTTP/SSE Responses transport required",
+            terminalMessage: failurePayload,
+          },
+          failedTurn
+        );
         this.close(1013, "http_fallback_required");
         return;
       }
       const code = error?.code || "upstream_websocket_connect_failed";
       const messageText = error instanceof Error ? error.message : String(error);
       const failurePayload = this.sendFailure(code, messageText);
-      void this.persistHistory({
-        status: Number.isInteger(error?.status) ? error.status : 502,
-        success: false,
-        errorCode: code,
-        errorMessage: messageText,
-        terminalMessage: failurePayload,
-      });
+      const failedTurn = this.claimTurn(turn, failurePayload);
+      void this.persistHistory(
+        {
+          status: Number.isInteger(error?.status) ? error.status : 502,
+          success: false,
+          errorCode: code,
+          errorMessage: messageText,
+          terminalMessage: failurePayload,
+        },
+        failedTurn
+      );
       this.close(1011, "upstream_connect_failed");
     }
   }
 
-  async persistHistory({
-    status = 200,
-    success = true,
-    errorCode = null,
-    errorMessage = null,
-    terminalMessage = null,
-    responseBody = null,
-  } = {}) {
-    if (!this.firstResponseBody) return;
+  async persistHistory(
+    {
+      status = 200,
+      success = true,
+      errorCode = null,
+      errorMessage = null,
+      terminalMessage = null,
+      responseBody = null,
+    } = {},
+    turn = null
+  ) {
+    if (!turn) return;
     // #7388: key the "already logged" guard per logical turn instead of once
     // per WS connection. Terminal events from a real response carry
     // `response.id` — use it so each turn on a reused connection logs
-    // independently, while the same id firing twice (retries) still logs
-    // exactly once. Session-ending failure paths (prepare failure, upstream
-    // error/close, connect failure) don't carry a response id — they end the
-    // session, so they share one sentinel key and still log exactly once.
-    const turnId = toStringOrNull(terminalMessage?.response?.id) || SESSION_TERMINAL_TURN_KEY;
+    // independently, while claimTurn() prevents the same terminal response
+    // from being claimed twice. Failure paths without response.id use the
+    // logical turn id directly.
+    const turnId = turn.callLogId;
     if (this.loggedTurnIds.has(turnId)) return;
     this.loggedTurnIds.add(turnId);
 
     const finishedAt = Date.now();
+    turn.completedAt = finishedAt;
+    const timing = this.getTurnTiming(turn, finishedAt);
     try {
       await callInternal(this.fetchImpl, this.baseUrl, this.bridgeSecret, "log", {
         sessionId: this.sessionId,
+        callLogId: turn.callLogId,
         transport: "responses_websocket",
         requestUrl: this.requestUrl,
         headers: getAuthHeaders(this.requestUrl, this.requestHeaders),
         path: new URL(this.requestUrl || "/v1/responses", "http://omniroute.local").pathname,
-        startedAt: new Date(this.startedAt).toISOString(),
+        startedAt: new Date(timing.startedAt).toISOString(),
         completedAt: new Date(finishedAt).toISOString(),
-        durationMs: Math.max(0, finishedAt - this.startedAt),
+        durationMs: timing.durationMs,
+        ttftMs: timing.ttftMs,
         status: toFiniteNumber(status),
         success,
         errorCode,
         errorMessage,
-        clientRequest: this.currentRequestBody || this.firstResponseBody,
+        clientRequest: turn.requestBody,
         terminalMessage,
         responseBody,
         sourceFormat: "openai-responses",
         targetFormat: "openai-responses",
-        ...this.preparedContext,
+        ...turn.preparedContext,
       });
     } catch {
       // History logging must never break an already-established WebSocket session.

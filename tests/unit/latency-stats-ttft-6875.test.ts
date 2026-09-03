@@ -37,8 +37,9 @@ test.after(() => {
 
 test("getModelLatencyStats aggregates avgTtftMs/avgE2ELatencyMs/avgTokensPerSecond over successful rows", async () => {
   const now = Date.now();
-  // latencyMs / ttft / tokensOutput chosen so tokens/sec is a clean number per row:
-  // 50/(1000/1000)=50, 100/(2000/1000)=50, 300/(4000/1000)=75 -> mean 58.33
+  // latencyMs / ttft / tokensOutput chosen so post-TTFT tokens/sec is easy to
+  // verify: 50/(900/1000)=55.56, 100/(1800/1000)=55.56,
+  // 300/(3700/1000)=81.08 -> mean 64.06.
   const rows = [
     { latencyMs: 1000, ttftMs: 100, tokensOutput: 50 },
     { latencyMs: 2000, ttftMs: 200, tokensOutput: 100 },
@@ -70,7 +71,38 @@ test("getModelLatencyStats aggregates avgTtftMs/avgE2ELatencyMs/avgTokensPerSeco
   // column exists in usage_history beyond latency_ms/ttft_ms).
   assert.equal(entry.avgE2ELatencyMs, entry.avgLatencyMs);
   assert.equal(entry.avgE2ELatencyMs, 2333);
-  assert.equal(Math.round(entry.avgTokensPerSecond * 100) / 100, 58.33);
+  assert.equal(Math.round(entry.avgTokensPerSecond * 100) / 100, 64.06);
+});
+
+test("getModelLatencyStats excludes invalid post-TTFT intervals from TPS but keeps latency", async () => {
+  await usageHistory.saveRequestUsage({
+    provider: "invalid-ttft-provider",
+    model: "invalid-ttft-model",
+    success: true,
+    latencyMs: 1000,
+    timeToFirstTokenMs: 1000,
+    tokens: { output: 999 },
+    timestamp: new Date().toISOString(),
+  });
+  await usageHistory.saveRequestUsage({
+    provider: "invalid-ttft-provider",
+    model: "invalid-ttft-model",
+    success: true,
+    latencyMs: 2000,
+    timeToFirstTokenMs: 500,
+    tokens: { output: 100 },
+    timestamp: new Date(Date.now() - 60 * 1000).toISOString(),
+  });
+
+  const stats = await usageHistory.getModelLatencyStats({
+    windowHours: 1,
+    minSamples: 1,
+  });
+
+  const entry = stats["invalid-ttft-provider/invalid-ttft-model"];
+  assert.ok(entry);
+  assert.equal(entry.avgLatencyMs, 1500);
+  assert.equal(entry.avgTokensPerSecond, 66.67);
 });
 
 test("getModelLatencyStats guards divide-by-zero when latency_ms <= 0 for tokens/sec", async () => {
@@ -103,9 +135,9 @@ test("getModelLatencyStats guards divide-by-zero when latency_ms <= 0 for tokens
   assert.ok(entry);
   assert.ok(Number.isFinite(entry.avgTokensPerSecond));
   // Only the latencyMs=1000 row can contribute a valid tokens/sec sample
-  // (100 tokens / 1s = 100 tok/s); the zero-latency row must be excluded,
+  // (100 tokens / 950ms of generation = 105.26 tok/s); the zero-latency row must be excluded,
   // not divide-by-zero into Infinity/NaN.
-  assert.equal(entry.avgTokensPerSecond, 100);
+  assert.equal(entry.avgTokensPerSecond, 105.26);
 });
 
 test("getModelLatencyStats TTFT falls back to all-sample TTFTs when successful sample count is below minSamples", async () => {
