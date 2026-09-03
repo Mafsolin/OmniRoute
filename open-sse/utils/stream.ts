@@ -18,6 +18,7 @@ import {
   createSSEDataLineNormalizer,
   createSSEEventPrefixBuffer,
   hasValuableContent,
+  isKnownNonClaudeStreamPayload,
   fixInvalidId,
   formatSSE,
   unwrapGeminiChunk,
@@ -677,13 +678,26 @@ export function createSSEStream(options: StreamOptions = {}) {
   }
 
   // Canonical streaming timing (TTFT / ITL / interruption). One instance per
-  // stream, marked from the transform below. ttft() = first-forwarded-SSE-chunk
-  // latency (NOT token-level) — see streamTiming.ts.
+  // stream, marked from the transform below. ttft() = time to the first chunk
+  // carrying real generated output — see streamTiming.ts.
   const timing: StreamTiming = createStreamTiming();
   /** Forward a pre-encoded SSE chunk, marking TTFT/ITL on the way. */
   const forward = (controller: TransformStreamDefaultController<Uint8Array>, bytes: Uint8Array) => {
     timing.markForward();
     controller.enqueue(bytes);
+  };
+  /**
+   * Forward a chunk that carries real generated output (token text, reasoning
+   * or tool-call arguments), so TTFT measures the model's first token rather
+   * than the protocol scaffolding (`response.created`, SSE comments,
+   * keepalives) that is forwarded within milliseconds of the request.
+   */
+  const forwardGenerated = (
+    controller: TransformStreamDefaultController<Uint8Array>,
+    bytes: Uint8Array
+  ) => {
+    timing.markGeneratedOutput();
+    forward(controller, bytes);
   };
 
   // Drop internal commentary-phase Responses output before forwarding (#6199).
@@ -1057,7 +1071,20 @@ export function createSSEStream(options: StreamOptions = {}) {
     clientPayloadCollector.push(itemSanitized);
     reqLogger?.appendConvertedChunk?.(output);
     forwardedValuableChunk = true;
-    forward(controller, encoder.encode(output));
+    // hasValuableContent() above still admits scaffolding such as an
+    // assistant role-only bootstrap chunk, so TTFT uses the stricter
+    // generated-output predicate; Claude events are always real output here.
+    if (
+      sourceFormat === FORMATS.CLAUDE ||
+      isKnownNonClaudeStreamPayload(
+        itemSanitized,
+        typeof item?.event === "string" ? item.event : ""
+      )
+    ) {
+      forwardGenerated(controller, encoder.encode(output));
+    } else {
+      forward(controller, encoder.encode(output));
+    }
   };
 
   const emitFinalSseMetadata = async (
@@ -2046,7 +2073,20 @@ export function createSSEStream(options: StreamOptions = {}) {
             }
 
             reqLogger?.appendConvertedChunk?.(output);
-            forward(controller, encoder.encode(output));
+            // TTFT must track the model's first real token, not the
+            // `response.created`/scaffolding frame that lands within a few ms
+            // of the request. Unparsed lines keep the plain forward and fall
+            // back to first-forward latency inside StreamTiming.
+            if (
+              clientPayload !== null &&
+              typeof clientPayload === "object" &&
+              !Array.isArray(clientPayload) &&
+              isKnownNonClaudeStreamPayload(clientPayload as Record<string, unknown>)
+            ) {
+              forwardGenerated(controller, encoder.encode(output));
+            } else {
+              forward(controller, encoder.encode(output));
+            }
             if (failurePayload) {
               let failureHandled = false;
               if (onFailure) {

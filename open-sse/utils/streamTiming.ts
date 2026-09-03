@@ -34,6 +34,13 @@ export interface StreamTiming {
   startedAt: number;
   firstByteAt: number | null;
   firstForwardAt: number | null;
+  /**
+   * First forwarded chunk that carried real generated output (token text,
+   * reasoning, or tool-call arguments) — as opposed to protocol scaffolding
+   * like `response.created`, SSE comments or keepalive frames. This is what
+   * TTFT is measured from; see `markGeneratedOutput`.
+   */
+  firstGeneratedOutputAt: number | null;
   lastForwardAt: number | null;
   /** Mean gap between forwarded chunks (ms), bounded window. */
   interChunkGaps: number[];
@@ -41,8 +48,20 @@ export interface StreamTiming {
   interrupted: boolean;
   markByte(): void;
   markForward(): void;
+  /**
+   * Mark the first chunk carrying real generated output. Callers pass the
+   * result of a format-aware content predicate; scaffolding events must not
+   * call this. Idempotent — only the first call is recorded.
+   */
+  markGeneratedOutput(): void;
   markInterrupted(): void;
-  /** First-forwarded-SSE-chunk latency in ms, or null if nothing was forwarded. */
+  /**
+   * Time to first generated output token in ms, or null when the stream
+   * forwarded nothing of value. Falls back to first-forwarded-chunk latency
+   * only when no chunk was ever classified as generated output, so a provider
+   * whose events this build cannot classify degrades to the old signal rather
+   * than reporting null.
+   */
   ttftMs(): number | null;
   /** Mean inter-chunk gap in ms, or null when fewer than 2 chunks were forwarded. */
   avgItlMs(): number | null;
@@ -58,6 +77,7 @@ export function createStreamTiming(): StreamTiming {
     startedAt: performance.now(),
     firstByteAt: null,
     firstForwardAt: null,
+    firstGeneratedOutputAt: null,
     lastForwardAt: null,
     interChunkGaps: [],
     forwardedChunks: 0,
@@ -74,11 +94,19 @@ export function createStreamTiming(): StreamTiming {
       this.lastForwardAt = now;
       this.forwardedChunks += 1;
     },
+    markGeneratedOutput() {
+      if (this.firstGeneratedOutputAt === null) this.firstGeneratedOutputAt = performance.now();
+    },
     markInterrupted() {
       this.interrupted = true;
     },
     ttftMs() {
-      return this.firstForwardAt === null ? null : this.firstForwardAt - this.startedAt;
+      // Prefer the first real generated token. Scaffolding (`response.created`,
+      // SSE comments, keepalives) is forwarded within a few ms of the request,
+      // so measuring from firstForwardAt reported ~10 ms TTFT against a 12 s
+      // latency and made the decode-rate/TPS derivation meaningless.
+      const at = this.firstGeneratedOutputAt ?? this.firstForwardAt;
+      return at === null ? null : at - this.startedAt;
     },
     avgItlMs() {
       if (this.interChunkGaps.length === 0) return null;
