@@ -2641,7 +2641,7 @@ async function handleCodexImageGeneration({
       }
 
       const data =
-        directJson && typeof directJson === "object" && Array.isArray(directJson.data)
+        isJsonObject(directJson) && Array.isArray(directJson.data)
           ? (directJson.data as Array<Record<string, unknown>>)
           : [];
       if (data.length === 0) {
