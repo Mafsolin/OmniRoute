@@ -15,6 +15,7 @@ import { loginSchema } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
 import { checkLoginGuard, clearLoginAttempts, recordLoginFailure } from "@/server/auth/loginGuard";
 import { AUTHZ_HEADER_TRUSTED_PEER_IP } from "@/server/authz/headers";
+import { addToBlacklist, configureIPFilter } from "@omniroute/open-sse/services/ipFilter.ts";
 
 // SECURITY: No hardcoded fallback — JWT_SECRET must be configured.
 if (!process.env.JWT_SECRET) {
@@ -213,10 +214,28 @@ export async function POST(request: NextRequest) {
       metadata: {
         reason: "invalid_password",
         lockedOut: failureDecision.allowed === false,
+        permanentBan: failureDecision.permanentBan === true,
+        escalationStage: failureDecision.escalationStage,
         sourceScope,
         internalOrigin: sourceScope === "loopback" || sourceScope === "private",
       },
     });
+
+    if (failureDecision.permanentBan) {
+      // Never persist an unresolved/missing address. With the trusted peer stamp
+      // or proxy-derived audit IP this is a concrete client address; when it is
+      // unavailable, the in-memory guard still protects the request.
+      if (clientIp && clientIp !== "unknown") {
+        // The blacklist is persistent, and enabling the blacklist mode here
+        // makes the escalation self-contained on fresh installations too.
+        configureIPFilter({ enabled: true, mode: "blacklist" });
+        addToBlacklist(clientIp);
+      }
+      return NextResponse.json(
+        { error: "This IP address has been permanently blocked after repeated failed logins." },
+        { status: 403 }
+      );
+    }
 
     if (!failureDecision.allowed) {
       return NextResponse.json(
