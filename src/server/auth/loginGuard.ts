@@ -7,8 +7,9 @@
  * limiting, not a substitute for it.
  *
  * Tunables:
- *   - failure threshold: 5 within `WINDOW_MS`
- *   - lockout duration: `LOCKOUT_MS`
+ *   - three failures within `WINDOW_MS` advance the escalation stage
+ *   - stage 1 locks for 15 minutes, stage 2 locks for 24 hours, stage 3
+ *     permanently adds the IP to the OmniRoute IP blacklist
  *   - sliding window: `WINDOW_MS`
  *
  * The guard is a no-op when `enabled` is false; the caller decides based on
@@ -17,12 +18,16 @@
 
 const WINDOW_MS = 15 * 60 * 1000;
 const LOCKOUT_MS = 15 * 60 * 1000;
-const FAILURE_THRESHOLD = 5;
+const LONG_LOCKOUT_MS = 24 * 60 * 60 * 1000;
+const FAILURE_THRESHOLD = 3;
+const MAX_ESCALATION_STAGE = 2;
 
 interface AttemptState {
   count: number;
   firstAttemptAt: number;
   lockedUntil: number | null;
+  /** 0 = first 15-minute lock, 1 = next 24-hour lock, 2 = next permanent ban. */
+  escalationStage: number;
 }
 
 const attempts: Map<string, AttemptState> = new Map();
@@ -45,6 +50,10 @@ function pruneExpiredAttempts(now: number): void {
 export interface GuardDecision {
   allowed: boolean;
   retryAfterSeconds?: number;
+  /** True when this failure crossed the final escalation threshold. */
+  permanentBan?: boolean;
+  /** Current escalation stage, useful for audit logging and tests. */
+  escalationStage?: number;
 }
 
 function nowMs(): number {
@@ -68,6 +77,7 @@ export function checkLoginGuard(
     return {
       allowed: false,
       retryAfterSeconds: Math.ceil((state.lockedUntil - now) / 1000),
+      escalationStage: state.escalationStage,
     };
   }
   return { allowed: true };
@@ -87,27 +97,58 @@ export function recordLoginFailure(
   const existing = attempts.get(key);
 
   if (!existing || now - existing.firstAttemptAt > WINDOW_MS) {
-    attempts.set(key, { count: 1, firstAttemptAt: now, lockedUntil: null });
-    return { allowed: true };
+    attempts.set(key, {
+      count: 1,
+      firstAttemptAt: now,
+      lockedUntil: null,
+      // A completed lockout is a new escalation cycle. The next three
+      // failures after the 15-minute lock start the 24-hour stage, and the
+      // next cycle reaches the permanent ban.
+      escalationStage:
+        existing?.lockedUntil && existing.lockedUntil <= now ? existing.escalationStage || 0 : 0,
+    });
+    const escalationStage =
+      existing?.lockedUntil && existing.lockedUntil <= now ? existing.escalationStage || 0 : 0;
+    return { allowed: true, escalationStage };
   }
 
   const nextCount = existing.count + 1;
   if (nextCount >= FAILURE_THRESHOLD) {
-    const lockedUntil = now + LOCKOUT_MS;
+    const escalationStage = existing.escalationStage;
+    if (escalationStage >= MAX_ESCALATION_STAGE) {
+      attempts.set(key, {
+        count: nextCount,
+        firstAttemptAt: existing.firstAttemptAt,
+        lockedUntil: null,
+        escalationStage: MAX_ESCALATION_STAGE + 1,
+      });
+      return {
+        allowed: false,
+        permanentBan: true,
+        escalationStage: MAX_ESCALATION_STAGE + 1,
+      };
+    }
+    const lockedUntil = now + (escalationStage === 0 ? LOCKOUT_MS : LONG_LOCKOUT_MS);
     attempts.set(key, {
       count: nextCount,
       firstAttemptAt: existing.firstAttemptAt,
       lockedUntil,
+      escalationStage: escalationStage + 1,
     });
-    return { allowed: false, retryAfterSeconds: Math.ceil(LOCKOUT_MS / 1000) };
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.ceil((lockedUntil - now) / 1000),
+      escalationStage: escalationStage + 1,
+    };
   }
 
   attempts.set(key, {
     count: nextCount,
     firstAttemptAt: existing.firstAttemptAt,
     lockedUntil: null,
+    escalationStage: existing.escalationStage,
   });
-  return { allowed: true };
+  return { allowed: true, escalationStage: existing.escalationStage };
 }
 
 export function clearLoginAttempts(rawIp: string | null | undefined): void {
@@ -126,5 +167,7 @@ export function getLoginGuardSizeForTests(): number {
 export const LOGIN_GUARD_TUNABLES = Object.freeze({
   WINDOW_MS,
   LOCKOUT_MS,
+  LONG_LOCKOUT_MS,
   FAILURE_THRESHOLD,
+  MAX_ESCALATION_STAGE,
 });

@@ -38,6 +38,33 @@ describe("loginGuard", () => {
     assert.ok((subsequent.retryAfterSeconds || 0) > 0);
   });
 
+  it("escalates 3 failures from 15 minutes to 24 hours, then permanent ban", () => {
+    mock.timers.enable({ apis: ["Date"] });
+    try {
+      const ip = "10.0.0.50";
+      for (let stage = 0; stage < 3; stage++) {
+        for (let attempt = 0; attempt < LOGIN_GUARD_TUNABLES.FAILURE_THRESHOLD; attempt++) {
+          const decision = recordLoginFailure(ip, { enabled: true });
+          if (attempt < LOGIN_GUARD_TUNABLES.FAILURE_THRESHOLD - 1) {
+            assert.equal(decision.allowed, true);
+          } else if (stage < 2) {
+            assert.equal(decision.allowed, false);
+            assert.equal(decision.escalationStage, stage + 1);
+            const expected =
+              stage === 0 ? LOGIN_GUARD_TUNABLES.LOCKOUT_MS : LOGIN_GUARD_TUNABLES.LONG_LOCKOUT_MS;
+            assert.equal(decision.retryAfterSeconds, Math.ceil(expected / 1000));
+            mock.timers.tick(expected + 1);
+          } else {
+            assert.equal(decision.allowed, false);
+            assert.equal(decision.permanentBan, true);
+          }
+        }
+      }
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
   it("scopes lockouts per IP", () => {
     const ipA = "10.0.0.1";
     const ipB = "10.0.0.2";
