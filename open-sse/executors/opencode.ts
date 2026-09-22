@@ -20,7 +20,11 @@ import {
   DEFAULT_OPENCODE_USER_AGENT,
   forwardOpencodeClientHeaders,
 } from "../utils/opencodeHeaders.ts";
-import { isZenGatedFreeModel, withZenGateToolStubs } from "../utils/opencodeZenFreeTier.ts";
+import {
+  isZenGatedFreeModel,
+  withZenGateStreamFlag,
+  withZenGateToolStubs,
+} from "../utils/opencodeZenFreeTier.ts";
 import {
   type AccountProxyConfig,
   type RotatableAccount,
@@ -934,6 +938,10 @@ export class OpencodeExecutor extends BaseExecutor {
     // the predicate and the exact stub pair are in opencodeZenFreeTier.ts.
     if (isZenGatedFreeModel(this.provider, model)) {
       modifiedBody = withZenGateToolStubs(modifiedBody);
+      // The gate refuses non-streaming bodies. chatCore already forces the upstream
+      // stream for this predicate, so the body has to carry the same flag or live
+      // requests come back 403 FreeTierError (see opencodeZenFreeTier.ts).
+      modifiedBody = withZenGateStreamFlag(modifiedBody);
     }
     return modifiedBody;
   }

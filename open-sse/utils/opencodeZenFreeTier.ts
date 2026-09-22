@@ -124,3 +124,16 @@ export function withZenGateToolStubs<T>(body: T): T {
   const stubs = missing.map((name) => zenGateStub(name, responsesShape));
   return { ...record, tools: tools ? [...tools, ...stubs] : stubs } as T;
 }
+
+/**
+ * Force the upstream `stream` flag on a gated free-tier body.
+ *
+ * The gate refuses a non-streaming body outright, so the body must agree with the
+ * `upstreamStream` that `chatCore` already forces for this same predicate. Without
+ * this the body keeps the caller's `stream: false` and upstream answers
+ * 403 FreeTierError even though the tool stubs and headers are correct.
+ */
+export function withZenGateStreamFlag<T>(body: T): T {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  return { ...(body as Record<string, unknown>), stream: true } as T;
+}
