@@ -2594,13 +2594,13 @@ async function handleCodexImageGeneration({
   // same OAuth credentials and returns the OpenAI image response shape, so use
   // that endpoint for this one model while keeping the hosted-tool path for
   // the GPT-5.6 image aliases.
-  if (model === "gpt-image-2") {
+  if (model === "gpt-image-2" || model === "gpt-image-2.5") {
     const directUrl =
       referenceImages.length > 0
         ? "https://chatgpt.com/backend-api/codex/images/edits"
         : "https://chatgpt.com/backend-api/codex/images/generations";
     const directBody: Record<string, unknown> = {
-      model: "gpt-image-2",
+      model,
       prompt,
       response_format: "b64_json",
     };

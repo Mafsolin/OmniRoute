@@ -300,3 +300,136 @@ test("#7388: a reused Responses WebSocket connection logs both of two logical tu
     await close(server);
   }
 });
+
+// #7388 follow-up: a logical turn that never reaches a terminal event still
+// consumed upstream quota, but the per-turn rewrite dropped it on the floor —
+// `close()`/`dispose()` cleared the session without flushing `pendingTurns`, so
+// an aborted turn left NO `call_logs` row at all. That is the same
+// observability hole per-turn logging exists to close, just on the failure
+// path: the Timeline shows a request that silently never happened.
+test("#7388: a turn abandoned by a client disconnect is still logged", async () => {
+  const internalRequests: Array<Record<string, unknown>> = [];
+
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url || "/", `http://${req.headers.host}`);
+    if (url.pathname === "/api/internal/codex-responses-ws") {
+      const body = JSON.parse((await readRequestBody(req)) || "{}");
+      internalRequests.push(body);
+
+      if (body.action === "authenticate") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, authenticated: true, authType: "api_key" }));
+        return;
+      }
+      if (body.action === "prepare") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            upstreamUrl: "wss://chatgpt.com/backend-api/codex/responses",
+            headers: { Authorization: "Bearer upstream-token" },
+            connectionId: "conn_1",
+            provider: "codex",
+            model: "gpt-5.4-mini",
+            response: { ...body.response, model: "gpt-5.4-mini", stream: undefined },
+          })
+        );
+        return;
+      }
+      if (body.action === "log") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, logged: true }));
+        return;
+      }
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "not_found" }));
+  });
+
+  // Upstream accepts the turn and streams one delta, but never sends a
+  // terminal event — the client hangs up mid-generation.
+  const fakeUpstream = {
+    send(data: string) {
+      const parsed = JSON.parse(data);
+      if (parsed.type !== "response.create") return;
+      setTimeout(() => {
+        fakeUpstream.onmessage?.({
+          data: JSON.stringify({
+            type: "response.output_text.delta",
+            response: { id: "resp_abandoned" },
+            delta: "partial",
+          }),
+        });
+      }, 5);
+    },
+    close() {},
+    onmessage: null as ((event: { data: string }) => void) | null,
+    onerror: null,
+    onclose: null,
+  };
+
+  const port = await listen(server);
+  const proxy = createResponsesWsProxy({
+    baseUrl: `http://127.0.0.1:${port}`,
+    bridgeSecret: "bridge-secret",
+    pingIntervalMs: 1000,
+    idleTimeoutMs: 10000,
+    wsFactory: async () => fakeUpstream,
+  });
+
+  server.on("upgrade", async (req, socket, head) => {
+    const handled = await proxy.handleUpgrade(req, socket, head);
+    if (!handled && !socket.destroyed) socket.destroy();
+  });
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/v1/responses?api_key=local-token`);
+  const downstream: Array<Record<string, unknown>> = [];
+  ws.addEventListener("message", (event) => {
+    downstream.push(JSON.parse(String(event.data)));
+  });
+
+  try {
+    await new Promise((resolve) => ws.addEventListener("open", resolve, { once: true }));
+    ws.send(
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.4-mini",
+        input: [{ role: "user", content: "Reply with exactly: pong" }],
+        stream: true,
+      })
+    );
+
+    // Wait until the turn is genuinely in flight (a delta arrived) so the
+    // disconnect below abandons a started turn rather than racing setup.
+    await waitFor(() => downstream.some((entry) => entry.type === "response.output_text.delta"));
+
+    ws.close();
+
+    const logRequests = await waitFor(() => {
+      const logs = internalRequests.filter((entry) => entry.action === "log");
+      return logs.length > 0 ? logs : null;
+    });
+
+    assert.equal(
+      logRequests.length,
+      1,
+      "an abandoned in-flight turn must still produce exactly one call-log row"
+    );
+    const [entry] = logRequests;
+    assert.equal(entry.success, false);
+    assert.equal(entry.errorCode, "responses_websocket_incomplete");
+    assert.equal(entry.status, 499);
+    assert.equal(typeof entry.callLogId, "string");
+    // The row must carry the abandoned turn's own request body and timing,
+    // not connection-level state.
+    const clientRequest = entry.clientRequest as { input?: Array<{ content?: string }> } | null;
+    assert.equal(clientRequest?.input?.[0]?.content, "Reply with exactly: pong");
+    assert.equal(typeof entry.durationMs, "number");
+    assert.ok(Number(entry.durationMs) >= 0);
+    // A delta was observed before the disconnect, so TTFT is a real measured
+    // decode start and must not be backfilled with the full duration.
+    assert.ok(Number(entry.ttftMs) <= Number(entry.durationMs));
+  } finally {
+    await close(server);
+  }
+});

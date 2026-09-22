@@ -280,6 +280,39 @@ function hasOpenAICompatibleStreamValue(parsed: Record<string, unknown>): boolea
   });
 }
 
+function hasResponsesOutputItemValue(item: unknown): boolean {
+  if (!isRecord(item)) return false;
+
+  const itemType = typeof item.type === "string" ? item.type : "";
+  if (itemType === "function_call") {
+    // A named function call is generated output even when its argument
+    // deltas arrive in later events.
+    return typeof item.name === "string" && item.name.length > 0;
+  }
+
+  if (itemType === "message") {
+    const content = Array.isArray(item.content) ? item.content : [];
+    return content.some((part) => {
+      if (!isRecord(part)) return false;
+      return typeof part.text === "string" && part.text.length > 0;
+    });
+  }
+
+  if (itemType === "reasoning") {
+    const summary = Array.isArray(item.summary) ? item.summary : [];
+    return summary.some(
+      (part) => isRecord(part) && typeof part.text === "string" && part.text.length > 0
+    );
+  }
+
+  return false;
+}
+
+function hasResponsesContentPartValue(part: unknown): boolean {
+  if (!isRecord(part)) return false;
+  return typeof part.text === "string" && part.text.length > 0;
+}
+
 function hasResponsesStreamValue(parsed: Record<string, unknown>, eventType = ""): boolean {
   const type = typeof parsed.type === "string" ? parsed.type : eventType;
   if (!type.startsWith("response.")) return false;
@@ -298,16 +331,16 @@ function hasResponsesStreamValue(parsed: Record<string, unknown>, eventType = ""
   }
 
   if (type === "response.output_item.added" || type === "response.output_item.done") {
-    return isRecord(parsed.item);
+    return hasResponsesOutputItemValue(parsed.item);
   }
 
   if (type === "response.content_part.added") {
-    return isRecord(parsed.part);
+    return hasResponsesContentPartValue(parsed.part);
   }
 
   if (type === "response.completed" && isRecord(parsed.response)) {
     const output = parsed.response.output;
-    return Array.isArray(output) && output.length > 0;
+    return Array.isArray(output) && output.some(hasResponsesOutputItemValue);
   }
 
   return false;
@@ -352,6 +385,13 @@ export function isKnownNonClaudeStreamPayload(
   parsed: Record<string, unknown>,
   eventType = ""
 ): boolean {
+  // Responses translators return SSE event envelopes as `{ event, data }`.
+  // Inspect the nested payload for TTFT classification; the protocol envelope
+  // itself only carries framing and must not be mistaken for generated output.
+  if (typeof parsed.event === "string" && isRecord(parsed.data)) {
+    return isKnownNonClaudeStreamPayload(parsed.data, parsed.event);
+  }
+
   if (Array.isArray(parsed.choices)) {
     return hasOpenAICompatibleStreamValue(parsed);
   }

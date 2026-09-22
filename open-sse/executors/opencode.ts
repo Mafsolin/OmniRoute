@@ -16,7 +16,11 @@ import {
   runWithDirectFetchContext,
   runWithProxyContext,
 } from "../utils/proxyFetch.ts";
-import { forwardOpencodeClientHeaders } from "../utils/opencodeHeaders.ts";
+import {
+  DEFAULT_OPENCODE_USER_AGENT,
+  forwardOpencodeClientHeaders,
+} from "../utils/opencodeHeaders.ts";
+import { isZenGatedFreeModel, withZenGateToolStubs } from "../utils/opencodeZenFreeTier.ts";
 import {
   type AccountProxyConfig,
   type RotatableAccount,
@@ -759,7 +763,7 @@ export class OpencodeExecutor extends BaseExecutor {
             userAgent:
               process.env[envUAKey]?.trim() ||
               process.env.OPENCODE_USER_AGENT?.trim() ||
-              "opencode",
+              DEFAULT_OPENCODE_USER_AGENT,
             client: process.env.OPENCODE_CLIENT?.trim() || "desktop",
             project: process.env.OPENCODE_PROJECT?.trim() || "global",
           };
@@ -923,6 +927,13 @@ export class OpencodeExecutor extends BaseExecutor {
     // placeholder for the affected model families.
     if (isThinkingMessageModel(model)) {
       modifiedBody = injectReasoningContentForThinkingModel(modifiedBody);
+    }
+    // Free-tier harness gate: opencode.ai refuses `-free` models unless the body
+    // itself looks like an agent turn (core tool names). The header half lives in
+    // opencodeHeaders.ts; the body half is added here. Measurements backing both
+    // the predicate and the exact stub pair are in opencodeZenFreeTier.ts.
+    if (isZenGatedFreeModel(this.provider, model)) {
+      modifiedBody = withZenGateToolStubs(modifiedBody);
     }
     return modifiedBody;
   }

@@ -500,6 +500,8 @@ type ChatCoreExecutorResult = ReturnType<typeof normalizeExecutorResult> & {
  */
 // extractSystemRoleMessages extracted to chatCore/claudeSystemRole.ts (#3501); re-exported above so
 // existing importers (e.g. tests/unit/system-role-extraction.test.ts) keep resolving it from here.
+import { isZenGatedFreeModel } from "../utils/opencodeZenFreeTier.ts";
+
 export async function handleChatCore({
   body,
   modelInfo,
@@ -1151,7 +1153,12 @@ export async function handleChatCore({
   // converts it back to JSON via readNonStreamingResponseBody. Passing this
   // flag into resolveStreamFlag would force `stream=true` and skip that
   // conversion, yielding STREAM_EARLY_EOF for JSON callers. (#2081, #6126)
-  const providerRequiresStreaming = REGISTRY[provider]?.forceStream === true;
+  // Free-tier harness gate: opencode.ai refuses `-free` bodies that do not set
+  // `stream: true` (403 FreeTierError), so those routes always stream upstream and
+  // the client-side `if (!stream)` branch drains the SSE back to JSON.
+  // See opencodeZenFreeTier.ts, which also owns the core-tool-name half.
+  const providerRequiresStreaming =
+    REGISTRY[provider]?.forceStream === true || isZenGatedFreeModel(provider, model);
   const stream =
     nativeCodexPassthrough && isCompactResponsesEndpoint(endpointPath)
       ? false

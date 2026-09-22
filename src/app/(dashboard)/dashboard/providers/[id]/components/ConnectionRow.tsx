@@ -19,7 +19,6 @@ import {
 import { normalizeCodexLimitPolicy, providerText, ERROR_TYPE_LABELS } from "../providerPageHelpers";
 import { getCodexPlanLabel } from "../codexPlanLabel";
 import type { CodexAccountPoolProjection } from "@omniroute/open-sse/services/codexAccount/index.ts";
-import CodexAccountDetails from "./CodexAccountDetails";
 import ProviderQuotaVisibilityToggle from "./ProviderQuotaVisibilityToggle";
 
 // ---------------------------------------------------------------------------
@@ -972,9 +971,6 @@ export default function ConnectionRow({
           </button>
         </div>
       </div>
-      {isCodex && connection.codexAccountPool ? (
-        <CodexAccountDetails pool={connection.codexAccountPool} />
-      ) : null}
     </div>
   );
 }

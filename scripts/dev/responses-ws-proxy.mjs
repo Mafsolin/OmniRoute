@@ -969,10 +969,36 @@ class ResponsesWsSession {
     }
   }
 
+  // #7388 follow-up: a turn that never reached a terminal event — the client
+  // hung up, the ping loop hit `idle_timeout`, or a frame failed to decode —
+  // still represents a real request that consumed upstream quota. Without this
+  // flush the turn is dropped on the floor and leaves no `call_logs` row at
+  // all, which is the same observability hole per-turn logging exists to close.
+  flushAbandonedTurns(reason = "connection_closed") {
+    if (this.pendingTurns.length === 0) return;
+    const errorMessage = `Responses WebSocket closed before the turn completed (${reason})`;
+    // claimTurn() splices from pendingTurns, so iterate over a snapshot.
+    for (const pending of [...this.pendingTurns]) {
+      const turn = this.claimTurn(pending);
+      if (!turn) continue;
+      void this.persistHistory(
+        {
+          status: 499,
+          success: false,
+          errorCode: "responses_websocket_incomplete",
+          errorMessage,
+          terminalMessage: buildFailurePayload("responses_websocket_incomplete", errorMessage),
+        },
+        turn
+      );
+    }
+  }
+
   close(code = 1000, reason = "normal_closure") {
     if (this.closed) return;
     this.closed = true;
 
+    this.flushAbandonedTurns(reason);
     clearInterval(this.pingTimer);
     this.cleanupBuffers();
     try {
@@ -999,6 +1025,7 @@ class ResponsesWsSession {
   dispose() {
     if (this.closed) return;
     this.closed = true;
+    this.flushAbandonedTurns("downstream_closed");
     clearInterval(this.pingTimer);
     this.cleanupBuffers();
     try {
