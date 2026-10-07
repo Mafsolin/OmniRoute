@@ -1,0 +1,28 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "incremental": false
+  },
+  "include": [
+    "src/lib/playground/*.ts",
+    "src/shared/schemas/playground.ts",
+    "src/shared/utils/fetchJsonWithDeadline.ts",
+    "src/lib/usage/usageStatsReader.ts",
+    "src/lib/usage/usage-stats-reader.d.cts",
+    "src/lib/usage/usageHistory.ts",
+    "src/lib/usage/usageStats.ts",
+    "src/lib/db/settings/pricing.ts",
+    "src/lib/db/cleanup.ts",
+    "src/lib/modelMetadataRegistry.ts",
+    "src/app/api/usage/model-latency-stats/route.ts",
+    "src/app/api/v1/models/catalog.ts",
+    "src/app/api/v1/models/catalogProviderMaps.ts",
+    "src/app/(dashboard)/dashboard/playground/**/*.tsx",
+    "src/app/(dashboard)/dashboard/playground/hooks/*.ts",
+    "src/app/(dashboard)/dashboard/providers/providerPageUtils.ts",
+    "src/app/(dashboard)/dashboard/providers/page.tsx",
+    "src/app/(dashboard)/dashboard/provider-stats/page.tsx"
+  ],
+  "exclude": ["node_modules", ".build", "dist"]
+}

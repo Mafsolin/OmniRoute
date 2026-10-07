@@ -10,6 +10,7 @@
 // instead of the chat.completions messages/SSE shape.
 
 import { endpointToPath, type PlaygroundEndpoint } from "@/lib/playground/codeExport";
+import { buildReasoningRequestFields, type ReasoningControlSpec } from "../reasoningControlUtils";
 
 /** Chat-shaped endpoints keep the existing messages[] + SSE-delta request/response flow. */
 export function isChatCompletionsEndpoint(endpoint: PlaygroundEndpoint | undefined): boolean {
@@ -38,11 +39,33 @@ export function buildNonChatRequestBody(
   return body;
 }
 
+/** Native Responses shape; Chat-only options are forwarded only through the shared reasoning gate. */
+export function buildResponsesRequestBody(
+  messages: Array<{ role: string; content: string }>,
+  model: string,
+  params: { max_tokens: number; temperature: number; top_p?: number; jsonMode?: boolean },
+  reasoning: { effort?: string; thinking?: boolean } = {},
+  spec: ReasoningControlSpec = { show: false, effortOptions: [] },
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { model, input: messages, stream: true };
+  if (params.max_tokens > 0) body.max_output_tokens = params.max_tokens;
+  if (params.temperature !== 1) body.temperature = params.temperature;
+  if (params.top_p !== undefined && params.top_p !== 1) body.top_p = params.top_p;
+  const gated = buildReasoningRequestFields(reasoning, spec);
+  if (gated.effort) body.reasoning = { effort: gated.effort };
+  if (gated.thinking) body.thinking = true;
+  if (params.jsonMode) body.text = { format: { type: "json_object" } };
+  return body;
+}
+
 /** Renders a non-chat endpoint's raw response text as a chat-bubble-friendly string. */
 export function formatNonChatResponse(rawText: string): string {
   try {
     const parsed = JSON.parse(rawText) as unknown;
-    return "```json\n" + JSON.stringify(parsed, null, 2) + "\n```";
+    const body = JSON.stringify(parsed, null, 2);
+    const longestRun = (body.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
+    const fence = "`".repeat(Math.max(3, longestRun + 1));
+    return `${fence}json\n${body}\n${fence}`;
   } catch {
     return rawText;
   }

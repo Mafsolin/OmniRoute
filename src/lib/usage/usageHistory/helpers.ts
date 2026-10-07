@@ -65,8 +65,11 @@ export interface LatencySampleBuckets {
 
 /**
  * Push one usage_history row's latency/TTFT/tokens-per-second sample into the
- * accumulator buckets. TPS measures only the decode phase (end-to-end latency
- * minus TTFT) and is accumulated as total output tokens / total decode time.
+ * accumulator buckets. Legacy TPS uses latency_ms minus ttft_ms as its interval
+ * and is accumulated as total reported output tokens / total legacy interval.
+ * Historical ttft_ms may measure reasoning/tool output or the first event, not
+ * the first visible text; whether tokens_output includes reasoning depends on
+ * the provider. This is not a pure text-decode or inference-speed measurement.
  * This weighted form avoids a short one-token response dominating a long
  * generation when the dashboard aggregates many requests. Rows with no valid
  * decode interval or no provider-reported output tokens are excluded from TPS,
@@ -147,7 +150,7 @@ export interface ModelLatencyStatsEntry {
    * already represents the full request wall-clock time (#6875).
    */
   avgE2ELatencyMs: number;
-  /** Weighted output tokens/sec after TTFT, using provider-reported output tokens. */
+  /** Weighted reported output/sec after legacy TTFT; reasoning is provider-dependent. */
   avgTokensPerSecond: number | null;
   /** Raw TPS numerator used to aggregate provider-level throughput correctly. */
   tpsOutputTokens: number;

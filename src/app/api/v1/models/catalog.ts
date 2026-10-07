@@ -63,7 +63,7 @@ import { getOpenRouterCatalog } from "@/lib/catalog/openrouterCatalog";
 import { hasEligibleConnectionForModel } from "@/domain/connectionModelRules";
 import {
   INTERNAL_PROXY_ERROR,
-  getCanonicalModelMetadata,
+  createBuildLocalCanonicalMetadataResolver,
   getCatalogDiagnosticsHeaders,
   type CatalogEnrichmentSnapshot,
 } from "@/lib/modelMetadataRegistry";
@@ -316,6 +316,7 @@ async function buildUnifiedModelsResponseCore(
     await yieldCatalogBuildTurn();
 
     const capabilityResolutionSnapshot = createModelCapabilityResolutionSnapshot();
+    const resolveBuildMetadata = createBuildLocalCanonicalMetadataResolver(capabilityResolutionSnapshot);
     const { aliasToProviderId, providerIdToAlias } = buildAliasMaps();
     const _qp = new URL(request.url).searchParams.get("prefix");
     const prefixMode =
@@ -594,10 +595,9 @@ async function buildUnifiedModelsResponseCore(
       const targetModel = getComboTargetModelId(target);
       if (!targetModel) return null;
 
-      const canonical = getCanonicalModelMetadata({
+      const canonical = resolveBuildMetadata({
         provider: targetModel.providerId,
         model: targetModel.modelId,
-        snapshot: capabilityResolutionSnapshot,
       });
       if (!canonical) return null;
 

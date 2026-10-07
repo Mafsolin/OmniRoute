@@ -209,6 +209,10 @@ export function getReasoningTokensOrNull(tokens: unknown): number | null {
   ) {
     return getReasoningTokens(tokens);
   }
+  const outputDetails = asRecord(tokenRecord.output_tokens_details);
+  if (hasAnyKey(outputDetails, ["reasoning_tokens"])) {
+    return toFiniteNumber(outputDetails.reasoning_tokens);
+  }
   return null;
 }
 

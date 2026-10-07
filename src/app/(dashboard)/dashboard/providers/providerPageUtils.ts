@@ -16,7 +16,7 @@ import {
 import { getModelsByProviderId } from "@/shared/constants/models";
 import { providerHasServiceKind } from "@/lib/providers/serviceKindIndex";
 import { compareTr, matchesAnyToken, matchesSearch } from "@/shared/utils/turkishText";
-import { fetchWithTimeout } from "@/shared/utils/fetchTimeout";
+import { fetchJsonWithDeadline } from "@/shared/utils/fetchJsonWithDeadline";
 import {
   parseProviderDisplayModePreference,
   type ProviderDisplayMode,
@@ -617,61 +617,76 @@ export interface OpenRouterProviderStatsEntry {
   popularityRank: number;
 }
 
-// Bound each first-paint request so a single stalled connection cannot freeze
-// the page on its skeleton. 20s is generous for a loopback dashboard API while
-// still guaranteeing the skeleton clears in bounded time.
-const PROVIDER_PAGE_FETCH_TIMEOUT_MS = 20_000;
+export type ProviderCoreData = Pick<ProviderPageData,
+  "connections" | "providerNodes" | "ccCompatibleProviderEnabled" | "blockedProviders" | "settings"> & {
+    /** Explicitly unsafe for mutations, but existing connections remain readable. */
+    policyError: string | null;
+  };
 
-/**
- * Load the four data sources the providers dashboard renders from, each bounded
- * by an AbortSignal timeout and independently degrading to a default.
- *
- * Why this exists (infinite-skeleton bug): the page used to gate its `loading`
- * flag on `await Promise.all([fetch(...) x4])` with **no** timeout. A bare
- * `fetch()` that never *settles* — e.g. the browser's 6-connection HTTP/1.1 pool
- * starved by the dashboard's RSC `<Link>` prefetch storm, or any stalled
- * connection — leaves `Promise.all` pending forever, so `setLoading(false)`
- * (which lives in the effect's `finally`) never runs and the Suspense skeleton
- * shows indefinitely. A `try/catch` cannot rescue a promise that never settles;
- * only a timeout/abort can. Here every request is time-bounded and failures
- * degrade to a default, so the loader always resolves within the timeout and the
- * page paints from whatever data arrived (matching the fast `/api/providers`).
- */
-export async function loadProviderPageData(
-  fetchImpl: typeof fetch = globalThis.fetch as typeof fetch,
-  timeoutMs: number = PROVIDER_PAGE_FETCH_TIMEOUT_MS
-): Promise<ProviderPageData> {
-  const safeJson = async (url: string, init?: RequestInit): Promise<any | null> => {
-    try {
-      const res = await fetchWithTimeout(url, { ...init, timeoutMs, fetchFn: fetchImpl });
-      if (!res.ok) return null;
-      return await res.json();
-    } catch {
-      // Timeout/abort/network error → degrade to the default; never hang.
-      return null;
+/** Critical reads must not masquerade as an empty, unconfigured installation. */
+export async function loadProviderCore(
+  fetchImpl: typeof fetch = globalThis.fetch,
+  timeoutMs = 5000,
+  signal?: AbortSignal
+): Promise<ProviderCoreData> {
+  const read = (url: string) => fetchJsonWithDeadline<Record<string, any>>(url, {
+    fetchFn: fetchImpl, timeoutMs, signal, cache: "no-store",
+  });
+  const policy = read("/api/settings").then((settings) => {
+    if (!settings || typeof settings !== "object" || Array.isArray(settings) || settings.error ||
+        (settings.blockedProviders !== undefined &&
+          (!Array.isArray(settings.blockedProviders) ||
+           !settings.blockedProviders.every((id: unknown) => typeof id === "string")))) {
+      throw new Error("Invalid provider settings policy payload");
     }
-  };
-
-  const [connectionsData, nodesData, expirationsData, settingsData, openRouterStatsData] =
-    await Promise.all([
-      safeJson("/api/providers"),
-      safeJson("/api/provider-nodes"),
-      safeJson("/api/providers/expiration"),
-      safeJson("/api/settings", { cache: "no-store" }),
-      safeJson("/api/providers/openrouter-stats"),
-    ]);
-
+    // This key is optional in the existing settings API; default only after a valid read.
+    return { settings, policyError: null as string | null };
+  }).catch((error: unknown) => {
+    if (signal?.aborted) throw signal.reason;
+    return { settings: null, policyError: error instanceof Error ? error.message : "Provider policy unavailable" };
+  });
+  const [connections, nodes, policyData] = await Promise.all([
+    read("/api/providers"), read("/api/provider-nodes"), policy,
+  ]);
+  if (!Array.isArray(connections?.connections) || !Array.isArray(nodes?.nodes)) {
+    throw new Error("Invalid provider data payload");
+  }
   return {
-    connections: Array.isArray(connectionsData?.connections) ? connectionsData.connections : [],
-    providerNodes: Array.isArray(nodesData?.nodes) ? nodesData.nodes : [],
-    ccCompatibleProviderEnabled: nodesData?.ccCompatibleProviderEnabled === true,
-    expirations: expirationsData ?? null,
-    blockedProviders: Array.isArray(settingsData?.blockedProviders)
-      ? settingsData.blockedProviders
-      : null,
-    settings: settingsData ?? null,
-    openRouterProviderStats: Array.isArray(openRouterStatsData?.data)
-      ? openRouterStatsData.data
-      : [],
+    connections: connections.connections,
+    providerNodes: nodes.nodes,
+    ccCompatibleProviderEnabled: nodes.ccCompatibleProviderEnabled === true,
+    blockedProviders: policyData.settings ? policyData.settings.blockedProviders ?? [] : null,
+    ...policyData,
   };
+}
+
+/** Optional data is separately bounded; the page never gates first paint on it. */
+export async function loadProviderEnrichment(
+  fetchImpl: typeof fetch = globalThis.fetch,
+  timeoutMs = 10000,
+  signal?: AbortSignal
+): Promise<Pick<ProviderPageData, "expirations" | "openRouterProviderStats">> {
+  const read = (url: string) => fetchJsonWithDeadline<Record<string, any>>(url, {
+    fetchFn: fetchImpl, timeoutMs, signal, cache: "no-store",
+  }).catch(() => null);
+  const [expirations, stats] = await Promise.all([
+    read("/api/providers/expiration"), read("/api/providers/openrouter-stats"),
+  ]);
+  return {
+    expirations,
+    openRouterProviderStats: Array.isArray(stats?.data) ? stats.data : [],
+  };
+}
+
+/** Compatibility composition for callers that explicitly need the complete snapshot. */
+export async function loadProviderPageData(
+  fetchImpl: typeof fetch = globalThis.fetch,
+  timeoutMs = 5000,
+  signal?: AbortSignal
+): Promise<ProviderPageData> {
+  const [core, enrichment] = await Promise.all([
+    loadProviderCore(fetchImpl, timeoutMs, signal),
+    loadProviderEnrichment(fetchImpl, timeoutMs, signal),
+  ]);
+  return { ...core, ...enrichment };
 }

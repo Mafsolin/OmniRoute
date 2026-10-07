@@ -17,8 +17,11 @@ const core = await import("../../src/lib/db/core.ts");
 const settingsDb = await import("../../src/lib/db/settings.ts");
 const usageHistory = await import("../../src/lib/usage/usageHistory.ts");
 const route = await import("../../src/app/api/usage/model-latency-stats/route.ts");
+const { getUsageStatsReader, closeUsageStatsReaderForTest } =
+  await import("../../src/lib/usage/usageStatsReader.ts");
 
 async function resetStorage() {
+  await closeUsageStatsReaderForTest();
   core.resetDbInstance();
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   fs.mkdirSync(TEST_DATA_DIR, { recursive: true });
@@ -89,6 +92,12 @@ test("model latency stats route aggregates and returns entries for seeded provid
   assert.equal(response.status, 200);
   const body = await response.json();
 
+  assert.deepEqual(body.measurement, {
+    ttft: "legacy-first-generated-output-or-first-event",
+    throughput: "reported-output-over-post-legacy-ttft",
+    includesReasoning: "provider-dependent",
+    historicalRowsReinterpreted: false,
+  });
   assert.equal(body.windowHours, 24);
   assert.ok(typeof body.generatedAt === "string");
   assert.equal(body.entries.length, 2);
@@ -184,15 +193,12 @@ test("model latency stats route returns 400 for maxRows above the allowed cap", 
 test("model latency stats route returns sanitized 500 body when the aggregate throws", async () => {
   await enableManagementAuth();
 
-  // Close the underlying SQLite handle without resetting the module-level
-  // singleton reference, so the next getDbInstance() call inside the route
-  // hits a closed connection ("The database connection is not open") and
-  // the route's catch block has to produce a real sanitized 500 — no
-  // module-namespace mocking (ESM bindings here are non-writable at runtime
-  // under node:test) and no fabricated error message.
-  core.closeDbInstance();
-  const db = core.getDbInstance();
-  db.close();
+  // The aggregate now has its own read-only connection. Closing the serving
+  // DB no longer simulates its failure; close the actual shared reader instead.
+  // No mocked namespace or fabricated error: reader.all() must reject, and the
+  // route must not silently execute the old SELECT in the serving thread.
+  core.getDbInstance();
+  await getUsageStatsReader().close();
 
   try {
     const response = await route.GET(

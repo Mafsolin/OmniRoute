@@ -765,7 +765,9 @@ let _cleanupSchedulerTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
  * Start the background cleanup scheduler. Runs cleanup on startup
- * and then every 6 hours. Runs VACUUM after deletes to reclaim disk space.
+ * and then every 6 hours. Reclaims at most 256 free pages after deletes.
+ * Full VACUUM must not run inside the serving event loop: slow disks can block
+ * every API and dashboard request for minutes. Schedule full compaction offline.
  *
  * Without this, tables grow unboundedly (compression_analytics 600K+ rows,
  * usage_history 250K+ rows) causing 1.4GB+ SQLite files and 3-8GB RSS
@@ -774,6 +776,18 @@ let _cleanupSchedulerTimer: ReturnType<typeof setInterval> | null = null;
 export function startCleanupScheduler(): void {
   if (_cleanupSchedulerTimer) return;
 
+  const reclaimBoundedPages = (db: ReturnType<typeof getDbInstance>, label: string): void => {
+    const autoVacuumMode = Number(db.pragma("auto_vacuum", { simple: true }));
+    if (autoVacuumMode !== 2) {
+      console.log(
+        `[Cleanup] Skipping bounded incremental reclamation after ${label}: SQLite auto_vacuum=${autoVacuumMode} (INCREMENTAL=2 required).`
+      );
+      return;
+    }
+    db.pragma("incremental_vacuum(256)");
+    console.log(`[Cleanup] Bounded incremental reclamation completed after ${label} cleanup.`);
+  };
+
   // Run cleanup 30s after startup (let the server initialize first).
   setTimeout(async () => {
     try {
@@ -781,13 +795,12 @@ export function startCleanupScheduler(): void {
       const proxyResult = await cleanupProxyLogs();
       const totalDeleted = result.totalDeleted + proxyResult.deleted;
       if (totalDeleted > 0) {
-        console.log(`[Cleanup] Startup cleanup freed ${totalDeleted} rows. Running VACUUM...`);
+        console.log(`[Cleanup] Startup cleanup freed ${totalDeleted} rows. Reclaiming up to 256 free pages...`);
         try {
           const db = getDbInstance();
-          db.exec("VACUUM");
-          console.log("[Cleanup] VACUUM completed after startup cleanup.");
+          reclaimBoundedPages(db, "startup");
         } catch (vacErr) {
-          console.error("[Cleanup] VACUUM after cleanup failed:", vacErr);
+          console.error("[Cleanup] Incremental reclamation after cleanup failed:", vacErr);
         }
       }
     } catch (err) {
@@ -802,13 +815,12 @@ export function startCleanupScheduler(): void {
       const proxyResult = await cleanupProxyLogs();
       const totalDeleted = result.totalDeleted + proxyResult.deleted;
       if (totalDeleted > 0) {
-        console.log(`[Cleanup] Periodic cleanup freed ${totalDeleted} rows. Running VACUUM...`);
+        console.log(`[Cleanup] Periodic cleanup freed ${totalDeleted} rows. Reclaiming up to 256 free pages...`);
         try {
           const db = getDbInstance();
-          db.exec("VACUUM");
-          console.log("[Cleanup] VACUUM completed after periodic cleanup.");
+          reclaimBoundedPages(db, "periodic");
         } catch (vacErr) {
-          console.error("[Cleanup] VACUUM after cleanup failed:", vacErr);
+          console.error("[Cleanup] Incremental reclamation after cleanup failed:", vacErr);
         }
       }
     } catch (err) {

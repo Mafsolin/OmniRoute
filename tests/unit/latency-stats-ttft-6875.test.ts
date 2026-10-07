@@ -14,10 +14,12 @@ process.env.DATA_DIR = TEST_DATA_DIR;
 const core = await import("../../src/lib/db/core.ts");
 const apiKeysDb = await import("../../src/lib/db/apiKeys.ts");
 const usageHistory = await import("../../src/lib/usage/usageHistory.ts");
+const { closeUsageStatsReaderForTest } = await import("../../src/lib/usage/usageStatsReader.ts");
 
 const clearPendingRequests = usageHistory.clearPendingRequests;
 
 async function resetStorage() {
+  await closeUsageStatsReaderForTest();
   core.resetDbInstance();
   apiKeysDb.resetApiKeyState();
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -29,7 +31,8 @@ test.beforeEach(async () => {
   await resetStorage();
 });
 
-test.after(() => {
+test.after(async () => {
+  await closeUsageStatsReaderForTest();
   core.resetDbInstance();
   apiKeysDb.resetApiKeyState();
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -37,9 +40,10 @@ test.after(() => {
 
 test("getModelLatencyStats aggregates avgTtftMs/avgE2ELatencyMs/avgTokensPerSecond over successful rows", async () => {
   const now = Date.now();
-  // latencyMs / ttft / tokensOutput chosen so post-TTFT tokens/sec is easy to
-  // verify: 50/(900/1000)=55.56, 100/(1800/1000)=55.56,
-  // 300/(3700/1000)=81.08 -> mean 64.06.
+  // Weighted post-legacy-TTFT throughput is total reported output / total
+  // generation interval: (50 + 100 + 300) / ((900 + 1800 + 3700) / 1000)
+  // = 70.31. The old 64.06 expectation averaged per-request rates instead;
+  // helpers.ts deliberately switched to weighted aggregation in 1f6e88cf5.
   const rows = [
     { latencyMs: 1000, ttftMs: 100, tokensOutput: 50 },
     { latencyMs: 2000, ttftMs: 200, tokensOutput: 100 },
@@ -71,7 +75,10 @@ test("getModelLatencyStats aggregates avgTtftMs/avgE2ELatencyMs/avgTokensPerSeco
   // column exists in usage_history beyond latency_ms/ttft_ms).
   assert.equal(entry.avgE2ELatencyMs, entry.avgLatencyMs);
   assert.equal(entry.avgE2ELatencyMs, 2333);
-  assert.equal(Math.round(entry.avgTokensPerSecond * 100) / 100, 64.06);
+  assert.equal(entry.tpsOutputTokens, 450);
+  assert.equal(entry.tpsGenerationMs, 6400);
+  assert.equal(entry.tpsSampleCount, 3);
+  assert.equal(entry.avgTokensPerSecond, 70.31);
 });
 
 test("getModelLatencyStats excludes invalid post-TTFT intervals from TPS but keeps latency", async () => {

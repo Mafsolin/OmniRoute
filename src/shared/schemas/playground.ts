@@ -63,5 +63,14 @@ export const StreamMetricsSchema = z.object({
   tokensIn: z.number().int().nonnegative(),
   tps: z.number().nonnegative().nullable(), // tokens/segundo (out/totalSec)
   costUsd: z.number().nonnegative().nullable(),
+  reportedTokensIn: z.number().int().nonnegative().nullable().optional(),
+  reportedTokensOut: z.number().int().nonnegative().nullable().optional(),
+  firstEventMs: z.number().nonnegative().nullable().optional(),
+  firstTextMs: z.number().nonnegative().nullable().optional(),
+  visibleTokens: z.number().int().nonnegative().nullable().optional(),
+  reasoningTokens: z.number().int().nonnegative().nullable().optional(),
+  visibleTps: z.number().nonnegative().nullable().optional(),
+  outputTps: z.number().nonnegative().nullable().optional(),
+  tpsKind: z.enum(["unknown", "burst", "delivery"]).optional(),
 });
 export type StreamMetrics = z.infer<typeof StreamMetricsSchema>;

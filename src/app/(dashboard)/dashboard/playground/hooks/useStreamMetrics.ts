@@ -16,7 +16,8 @@ export interface UseStreamMetrics {
   start: () => void;
   onFirstChunk: () => void;
   onChunk: (tokensInThisChunk: number) => void;
-  finish: (usage?: { prompt_tokens?: number; completion_tokens?: number }) => void;
+  finish: (usage?: { prompt_tokens?: number; completion_tokens?: number }) => StreamMetrics;
+  apply: (metrics: StreamMetrics) => void;
   reset: () => void;
 }
 
@@ -103,7 +104,7 @@ export function useStreamMetrics(modelPricing?: {
     // call setMetrics themselves or use a throttled update strategy.
   }
 
-  function finish(usage?: { prompt_tokens?: number; completion_tokens?: number }): void {
+  function finish(usage?: { prompt_tokens?: number; completion_tokens?: number }): StreamMetrics {
     const now = Date.now();
     refs.current.finishedAt = now;
     if (usage != null) {
@@ -114,15 +115,15 @@ export function useStreamMetrics(modelPricing?: {
         refs.current.tokensOut = usage.completion_tokens;
       }
     }
-    setMetrics(
-      computeMetrics({
-        ...refs.current,
-        pricing: modelPricing
-          ? { ...modelPricing, estimated: true }
-          : undefined,
-      }),
-    );
+    const snapshot = computeMetrics({
+      ...refs.current,
+      pricing: modelPricing ? { ...modelPricing, estimated: true } : undefined,
+    });
+    setMetrics(snapshot);
+    return snapshot;
   }
+
+  function apply(next: StreamMetrics): void { setMetrics(next); }
 
   function reset(): void {
     refs.current = {
@@ -141,6 +142,7 @@ export function useStreamMetrics(modelPricing?: {
     onFirstChunk,
     onChunk,
     finish,
+    apply,
     reset,
   };
 }

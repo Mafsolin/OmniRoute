@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["dom", "dom.iterable", "esnext"],
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
     "allowJs": true,
     "checkJs": false,
     "skipLibCheck": true,
@@ -17,10 +21,18 @@
     "incremental": true,
     "forceConsistentCasingInFileNames": true,
     "paths": {
-      "@/*": ["./src/*"],
-      "@omniroute/open-sse": ["./open-sse"],
-      "@omniroute/open-sse/*": ["./open-sse/*"],
-      "@omniroute/browser-pool": ["./packages/browser-pool/src"]
+      "@/*": [
+        "./src/*"
+      ],
+      "@omniroute/open-sse": [
+        "./open-sse"
+      ],
+      "@omniroute/open-sse/*": [
+        "./open-sse/*"
+      ],
+      "@omniroute/browser-pool": [
+        "./packages/browser-pool/src"
+      ]
     },
     "plugins": [
       {
@@ -41,7 +53,9 @@
     ".next-playwright/dev/types/**/*.ts",
     ".build/next/types/**/*.ts",
     ".build/next/dev/types/**/*.ts",
-    ".build/next/dev/dev/types/**/*.ts"
+    ".build/next/dev/dev/types/**/*.ts",
+    ".build/quality-dev/types/**/*.ts",
+    ".build/quality-dev/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

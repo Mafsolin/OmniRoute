@@ -34,19 +34,24 @@ function formatCost(usd: number | null): string {
  */
 export default function ProviderMetrics({ metrics }: ProviderMetricsProps) {
   const t = useTranslations("playground");
-  const { ttftMs, tps, tokensIn, tokensOut, costUsd } = metrics;
+  const { tokensIn, tokensOut, costUsd } = metrics;
+  const input = metrics.reportedTokensIn === undefined ? tokensIn : metrics.reportedTokensIn ?? "—";
+  const output = metrics.reportedTokensOut === undefined ? tokensOut : metrics.reportedTokensOut ?? "—";
 
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-muted font-mono">
       {/* TTFT */}
-      <span title={t("ttftTitle")}>TTFT {formatMs(ttftMs)}</span>
+      <span title={t("firstTextTitle")}>TTFT {formatMs(metrics.firstTextMs ?? metrics.ttftMs)}</span>
 
       {/* TPS */}
-      <span title={t("tpsTitle")}>· {formatTps(tps)}</span>
+      <span title={t("deliveryTpsTitle")}>
+        · {metrics.tpsKind === "delivery" ? formatTps(metrics.visibleTps ?? null)
+          : metrics.tpsKind === "burst" ? t("burstDelivery") : t("tpsUnavailable")}
+      </span>
 
       {/* Token counts */}
       <span title={t("tokenCountsTitle")}>
-        · {tokensIn}↑ {tokensOut}↓
+        · {input}↑ {output}↓
       </span>
 
       {/* Cost */}

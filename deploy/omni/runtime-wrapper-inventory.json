@@ -1,0 +1,32 @@
+[
+  {
+    "runtime": "peer-stamp.mjs",
+    "source": "scripts/dev/peer-stamp.mjs",
+    "equal": true
+  },
+  {
+    "runtime": "main-server-timeouts.mjs",
+    "source": "scripts/dev/main-server-timeouts.mjs",
+    "equal": true
+  },
+  {
+    "runtime": "http-method-guard.cjs",
+    "source": "scripts/dev/http-method-guard.cjs",
+    "equal": true
+  },
+  {
+    "runtime": "head-response-guard.cjs",
+    "source": "scripts/dev/head-response-guard.cjs",
+    "equal": true
+  },
+  {
+    "runtime": "systemd-notify.mjs",
+    "source": "scripts/dev/systemd-notify.mjs",
+    "equal": true
+  },
+  {
+    "runtime": "server-ws.mjs",
+    "source": "scripts/dev/standalone-server-ws.mjs",
+    "equal": false
+  }
+]

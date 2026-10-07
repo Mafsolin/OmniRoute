@@ -4,7 +4,7 @@
 
 import { getDbInstance } from "../core";
 import { backupDbFile } from "../backup";
-import { invalidateDbCache } from "../readCache";
+import { getCachedPricing, invalidateDbCache } from "../readCache";
 import { PROVIDER_ID_TO_ALIAS } from "@omniroute/open-sse/config/providerModels.ts";
 import { type JsonRecord, toRecord } from "./shared";
 
@@ -120,56 +120,81 @@ export async function getPricingWithSources(): Promise<{
   };
 }
 
+type PricingModelIndex = PricingModels | Map<string, JsonRecord>;
+type PricingIndexes = {
+  // Only keys that actually occur in the pricing snapshot live here.
+  providers: Map<string, PricingModelIndex>;
+  // Resolved public ids/aliases and negative lookups are kept separately so a
+  // miss for one spelling cannot become a false hit for another spelling.
+  resolved: Map<string, PricingModelIndex | null>;
+};
+
+const modelPricingIndexes = new WeakMap<object, PricingIndexes>();
+
 export async function getPricingForModel(provider: string, model: string) {
-  const pricing = await getPricing();
-
-  const findKeyInsensitive = <T>(
-    obj: Record<string, T> | undefined | null,
-    key: string
-  ): T | undefined => {
-    if (!obj || !key) return undefined;
-    const lowerKey = key.toLowerCase();
-    for (const [k, v] of Object.entries(obj)) {
-      if (k.toLowerCase() === lowerKey) return v;
-    }
-    return undefined;
-  };
-
-  const pLower = (provider || "").toLowerCase();
-  let providerPricing = findKeyInsensitive<PricingModels>(pricing, pLower);
-
-  if (!providerPricing) {
-    const alias = findKeyInsensitive<string>(PROVIDER_ID_TO_ALIAS, pLower);
-    if (alias) providerPricing = findKeyInsensitive(pricing, alias);
-  }
-
-  if (!providerPricing) {
-    for (const [id, mappedAlias] of Object.entries(PROVIDER_ID_TO_ALIAS)) {
-      if (typeof mappedAlias === "string" && mappedAlias.toLowerCase() === pLower) {
-        providerPricing = findKeyInsensitive(pricing, id);
-        if (providerPricing) break;
+  const pricing = (await getCachedPricing()) as PricingByProvider;
+  let indexes = modelPricingIndexes.get(pricing);
+  if (!indexes) {
+    const providers = new Map<string, PricingModelIndex>();
+    for (const [name, models] of Object.entries(pricing)) {
+      const key = name.toLowerCase();
+      if (!providers.has(key)) {
+        // Lazily index a provider only when it is requested.
+        providers.set(key, models);
       }
     }
+    indexes = { providers, resolved: new Map() };
+    modelPricingIndexes.set(pricing, indexes);
   }
 
-  if (!providerPricing) {
-    const np = pLower.replace(/-cn$/, "");
-    if (np && np !== pLower) {
-      providerPricing = findKeyInsensitive(pricing, np);
+  const pLower = (provider || "").toLowerCase();
+  let models: PricingModelIndex | null | undefined;
+  if (indexes.resolved.has(pLower)) {
+    models = indexes.resolved.get(pLower);
+  } else {
+    let providerKey = indexes.providers.has(pLower) ? pLower : null;
+    if (!providerKey) {
+      const alias = Object.entries(PROVIDER_ID_TO_ALIAS).find(
+        ([id]) => id.toLowerCase() === pLower
+      )?.[1];
+      if (alias && indexes.providers.has(alias.toLowerCase())) {
+        providerKey = alias.toLowerCase();
+      }
     }
+    if (!providerKey) {
+      for (const [id, alias] of Object.entries(PROVIDER_ID_TO_ALIAS)) {
+        if (typeof alias === "string" && alias.toLowerCase() === pLower) {
+          if (indexes.providers.has(id.toLowerCase())) {
+            providerKey = id.toLowerCase();
+          }
+          break;
+        }
+      }
+    }
+    if (!providerKey) {
+      const withoutCn = pLower.replace(/-cn$/, "");
+      if (withoutCn !== pLower && indexes.providers.has(withoutCn)) {
+        providerKey = withoutCn;
+      }
+    }
+    models = providerKey ? indexes.providers.get(providerKey) ?? null : null;
+    indexes.resolved.set(pLower, models);
   }
 
-  if (!providerPricing) return null;
-
+  if (!models) return null;
+  if (!(models instanceof Map)) {
+    const indexed = new Map<string, JsonRecord>();
+    for (const [name, value] of Object.entries(models)) {
+      const key = name.toLowerCase();
+      if (!indexed.has(key)) indexed.set(key, value);
+    }
+    const providerKey = [...indexes.providers.entries()].find(([, value]) => value === models)?.[0];
+    if (providerKey) indexes.providers.set(providerKey, indexed);
+    indexes.resolved.set(pLower, indexed);
+    models = indexed;
+  }
   const mLower = (model || "").toLowerCase();
-  let modelPricing = findKeyInsensitive<JsonRecord>(providerPricing, mLower);
-
-  if (!modelPricing) {
-    const hyphenModel = mLower.replace(/\./g, "-");
-    modelPricing = findKeyInsensitive(providerPricing, hyphenModel);
-  }
-
-  return modelPricing || null;
+  return models.get(mLower) || models.get(mLower.replace(/\./g, "-")) || null;
 }
 
 export async function updatePricing(pricingData: PricingByProvider) {
@@ -234,6 +259,7 @@ export async function resetPricing(provider: string, model?: string) {
   }
 
   backupDbFile("pre-write");
+  invalidateDbCache("pricing");
   const allRows = db.prepare("SELECT key, value FROM key_value WHERE namespace = 'pricing'").all();
   const result: Record<string, unknown> = {};
   for (const row of allRows) {
@@ -250,5 +276,6 @@ export async function resetAllPricing() {
   const db = getDbInstance();
   db.prepare("DELETE FROM key_value WHERE namespace = 'pricing'").run();
   backupDbFile("pre-write");
+  invalidateDbCache("pricing");
   return {};
 }

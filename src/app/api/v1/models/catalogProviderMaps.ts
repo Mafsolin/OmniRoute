@@ -112,20 +112,34 @@ export function prefixRoutesToProvider(prefix: string, providerId: string): bool
  * to only the prefixes that `parseModel()` actually routes back to `providerId`.
  * Extracted verbatim from the catalog host's local `getProviderPrefixes` closure.
  */
+const providerPrefixSnapshots = new WeakMap<AliasMaps, Map<string, string[]>>();
+
 export function getProviderPrefixes(
   maps: AliasMaps,
   providerId: string,
   rawProvider: string
 ): string[] {
+  // buildAliasMaps creates an immutable snapshot for each catalog/context build.
+  // Repeated combo targets share it; a later build gets a different WeakMap key.
+  let memo = providerPrefixSnapshots.get(maps);
+  const key = JSON.stringify([providerId, rawProvider]);
+  const hit = memo?.get(key);
+  if (hit) return hit.slice();
   const { aliasToProviderId, providerIdToAlias } = maps;
   const prefixes = new Set<string>([providerId, rawProvider, providerIdToAlias[providerId]]);
   for (const [alias, mappedProviderId] of Object.entries(aliasToProviderId)) {
     if (mappedProviderId === providerId) prefixes.add(alias);
   }
-  return [...prefixes].filter(
+  const result = [...prefixes].filter(
     (prefix): prefix is string =>
       typeof prefix === "string" && prefix.length > 0 && prefixRoutesToProvider(prefix, providerId)
   );
+  if (!memo) {
+    memo = new Map();
+    providerPrefixSnapshots.set(maps, memo);
+  }
+  memo.set(key, result);
+  return result.slice();
 }
 
 /**

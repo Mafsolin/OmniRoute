@@ -121,6 +121,11 @@ export const NATIVE_ASSET_ENTRIES = [
 /** @type {{label:string, src:string[], dest:string[]}[]} */
 const EXTRA_MODULE_ENTRIES = [
   {
+    label: "read-only usage statistics worker",
+    src: ["src", "lib", "usage", "usage-stats-reader.cjs"],
+    dest: ["usage-stats-reader.cjs"],
+  },
+  {
     // tlsClient.ts intentionally resolves wreq-js through a runtime-dynamic
     // require so Turbopack cannot rewrite the package name to a hashed external.
     // That also makes the package invisible to static tracing, so copy the whole

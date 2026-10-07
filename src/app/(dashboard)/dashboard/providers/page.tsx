@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from "react";
 import { Card, CardSkeleton, Badge, Button, CollapsibleSection } from "@/shared/components";
 import {
   AGGREGATOR_PROVIDER_IDS,
@@ -32,7 +32,8 @@ import {
   shouldShowFirstProviderHint,
   shouldShowProviderSection,
   upsertProviderNodeById,
-  loadProviderPageData,
+  loadProviderCore,
+  loadProviderEnrichment,
 } from "./providerPageUtils";
 import type { ProviderEntry, OpenRouterProviderStatsEntry } from "./providerPageUtils";
 import { OpenRouterProviderStatsProvider } from "./context/openRouterProviderStatsContext";
@@ -283,28 +284,63 @@ function ProvidersPageContent() {
     setActiveServiceKind,
   });
 
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        // Each request is time-bounded (see loadProviderPageData); a single
-        // stalled connection can no longer wedge `loading` on `true` and freeze
-        // the page on its skeleton forever.
-        const data = await loadProviderPageData();
-        setConnections(data.connections);
-        setProviderNodes(data.providerNodes);
-        setCcCompatibleProviderEnabled(data.ccCompatibleProviderEnabled);
-        if (data.expirations) setExpirations(data.expirations);
-        if (data.blockedProviders) setBlockedProviders(data.blockedProviders);
-        setCodexGlobalServiceMode(getCodexGlobalServiceMode(data.settings));
-        setOpenRouterProviderStats(data.openRouterProviderStats);
-      } catch (error) {
-        console.log("Error fetching data:", error);
-      } finally {
-        setLoading(false);
+  const [coreError, setCoreError] = useState<string | null>(null);
+  const [hasCoreData, setHasCoreData] = useState(false);
+  const [coreRefreshing, setCoreRefreshing] = useState(false);
+  const [policyReady, setPolicyReady] = useState(false);
+  const [policyError, setPolicyError] = useState<string | null>(null);
+
+  const coreController = useRef<AbortController | null>(null);
+  const pageMounted = useRef(false);
+
+  const refreshCore = useCallback(async () => {
+    if (!pageMounted.current) return;
+    coreController.current?.abort();
+    const controller = new AbortController();
+    coreController.current = controller;
+    const isCurrent = () => pageMounted.current && !controller.signal.aborted &&
+      coreController.current === controller;
+    setCoreRefreshing(true);
+    setPolicyReady(false);
+    try {
+      const data = await loadProviderCore(globalThis.fetch, 5000, controller.signal);
+      if (!isCurrent()) return;
+      setConnections(data.connections);
+      setProviderNodes(data.providerNodes);
+      setCcCompatibleProviderEnabled(data.ccCompatibleProviderEnabled);
+      if (data.blockedProviders) setBlockedProviders(data.blockedProviders);
+      if (data.settings) setCodexGlobalServiceMode(getCodexGlobalServiceMode(data.settings));
+      setPolicyError(data.policyError);
+      setPolicyReady(data.settings !== null && data.policyError === null);
+      setHasCoreData(true);
+      setCoreError(null);
+    } catch (error) {
+      if (isCurrent()) {
+        setCoreError(error instanceof Error ? error.message : "Provider data unavailable");
       }
-    };
-    fetchData();
+    } finally {
+      if (isCurrent()) {
+        setLoading(false);
+        setCoreRefreshing(false);
+      }
+    }
   }, []);
+
+  useEffect(() => {
+    pageMounted.current = true;
+    const controller = new AbortController();
+    void refreshCore();
+    void loadProviderEnrichment(globalThis.fetch, 10000, controller.signal).then((data) => {
+      if (controller.signal.aborted) return;
+      if (data.expirations) setExpirations(data.expirations);
+      setOpenRouterProviderStats(data.openRouterProviderStats);
+    });
+    return () => {
+      pageMounted.current = false;
+      coreController.current?.abort();
+      controller.abort();
+    };
+  }, [refreshCore]);
 
   useEffect(() => {
     if (!shouldSyncProviderDisplayMode(displayModePreferenceReady, loading)) return;
@@ -342,7 +378,7 @@ function ProvidersPageContent() {
   }, []);
 
   const handleRepairEnv = async () => {
-    if (!oauthEnvRepairStatus?.available || repairingEnv) return;
+    if (!policyReady || !oauthEnvRepairStatus?.available || repairingEnv) return;
 
     setRepairingEnv(true);
     try {
@@ -463,6 +499,7 @@ function ProvidersPageContent() {
 
   // Toggle all connections for a provider on/off
   const handleToggleProvider = async (providerId: string, authType: string, newActive: boolean) => {
+    if (!policyReady) return;
     // Mirror getProviderStats: dual-auth providers (qoder, …) toggle BOTH their
     // oauth and apikey/PAT connections from the single OAuth card.
     const matchesToggle = (c: { provider: string; authType?: string }) =>
@@ -485,7 +522,7 @@ function ProvidersPageContent() {
   };
 
   const handleBatchTest = async (mode, providerId = null) => {
-    if (testingMode) return;
+    if (!policyReady || testingMode) return;
     setTestingMode(mode === "provider" ? providerId : mode);
     setTestResults(null);
     const controller = new AbortController();
@@ -868,12 +905,42 @@ function ProvidersPageContent() {
     );
   }
 
-  const showFirstProviderHint =
+  const loadErrorNotice = coreError || policyError ? (
+    <Card padding="lg">
+      <div role="alert" className="space-y-3">
+        <h2 className="text-lg font-semibold text-red-600 dark:text-red-400">
+          {policyError && !coreError
+            ? providerText(t, "pagePolicyErrorTitle", "Provider policy unavailable")
+            : providerText(t, "pageLoadErrorTitle", "Failed to load providers")}
+        </h2>
+        <p className="text-sm text-text-muted">
+          {policyError && !coreError
+            ? providerText(t, "pagePolicyErrorDescription", "Provider cards are read-only until settings policy can be loaded. Retry to enable changes.")
+            : providerText(t, "pageLoadErrorDescription", "We could not load provider data right now. Check your connection and try again.")}
+        </p>
+        <p className="text-sm text-text-muted">{coreError || policyError}</p>
+        <Button disabled={coreRefreshing} onClick={() => void refreshCore()}>
+          {providerText(t, "pageLoadErrorRetry", "Try Again")}
+        </Button>
+      </div>
+    </Card>
+  ) : null;
+  if (!hasCoreData) return <div className="flex flex-col gap-6">{loadErrorNotice}</div>;
+
+  const showFirstProviderHint = !coreError &&
     shouldShowFirstProviderHint(connections.length, searchQuery) && !showAllProviders;
 
   return (
     <OpenRouterProviderStatsProvider entries={openRouterProviderStats}>
       <div className="flex flex-col gap-6">
+        {loadErrorNotice}
+        <fieldset disabled={!policyReady} className="flex min-w-0 flex-col gap-6 border-0 p-0 m-0"
+          onClickCapture={(event) => {
+            if (!policyReady && (event.target as HTMLElement).closest("button, input, select, textarea")) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          }}>
         {showFirstProviderHint && (
           <Card padding="lg">
             <div className="flex flex-col items-center justify-center text-center">
@@ -888,7 +955,7 @@ function ProvidersPageContent() {
                   "Connect an AI provider to start routing requests through OmniRoute. You can use free providers, API keys, or OAuth accounts."}
               </p>
               <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-                <Button icon="add" onClick={() => router.push("/dashboard/providers/new")}>
+                <Button icon="add" disabled={!policyReady} onClick={() => { if (policyReady) router.push("/dashboard/providers/new"); }}>
                   {providerText(t, "onboardingWizard", "Provider Onboarding Wizard")}
                 </Button>
                 <a
@@ -918,8 +985,8 @@ function ProvidersPageContent() {
             setActiveCategory(freeOnly ? null : category);
           }}
           onDisplayModeChange={setProviderDisplayMode}
-          onNewProvider={() => router.push("/dashboard/providers/new")}
-          onImportFromFile={() => setShowImportFromFileModal(true)}
+          onNewProvider={() => { if (policyReady) router.push("/dashboard/providers/new"); }}
+          onImportFromFile={() => { if (policyReady) setShowImportFromFileModal(true); }}
           searchQuery={searchQuery}
           setModelSearchQuery={setModelSearchQuery}
           setSearchQuery={setSearchQuery}
@@ -1014,7 +1081,7 @@ function ProvidersPageContent() {
                       ccCompatibleProviders.length > 0) && (
                       <button
                         onClick={() => handleBatchTest("compatible")}
-                        disabled={!!testingMode}
+                        disabled={!policyReady || !!testingMode}
                         className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                           testingMode === "compatible"
                             ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1034,7 +1101,7 @@ function ProvidersPageContent() {
                       <Button
                         size="sm"
                         icon="add"
-                        onClick={() => setShowAddCcCompatibleModal(true)}
+                        disabled={!policyReady} onClick={() => { if (policyReady) setShowAddCcCompatibleModal(true); }}
                       >
                         {addCcCompatibleLabel}
                       </Button>
@@ -1042,11 +1109,11 @@ function ProvidersPageContent() {
                     <Button
                       size="sm"
                       icon="add"
-                      onClick={() => setShowAddAnthropicCompatibleModal(true)}
+                      disabled={!policyReady} onClick={() => { if (policyReady) setShowAddAnthropicCompatibleModal(true); }}
                     >
                       {t("addAnthropicCompatible")}
                     </Button>
-                    <Button size="sm" icon="add" onClick={() => setShowAddCompatibleModal(true)}>
+                    <Button size="sm" icon="add" disabled={!policyReady} onClick={() => { if (policyReady) setShowAddCompatibleModal(true); }}>
                       {t("addOpenAICompatible")}
                     </Button>
                   </div>
@@ -1097,7 +1164,7 @@ function ProvidersPageContent() {
                     {oauthEnvRepairStatus?.available && oauthEnvRepairStatus.missingCount > 0 && (
                       <button
                         onClick={handleRepairEnv}
-                        disabled={repairingEnv}
+                        disabled={!policyReady || repairingEnv}
                         className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                           repairingEnv
                             ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1114,7 +1181,7 @@ function ProvidersPageContent() {
                     )}
                     <button
                       onClick={() => handleBatchTest("oauth")}
-                      disabled={!!testingMode}
+                      disabled={!policyReady || !!testingMode}
                       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                         testingMode === "oauth"
                           ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1166,7 +1233,7 @@ function ProvidersPageContent() {
                   </h2>
                   <button
                     onClick={() => handleBatchTest("ide")}
-                    disabled={!!testingMode}
+                    disabled={!policyReady || !!testingMode}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                       testingMode === "ide"
                         ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1226,7 +1293,7 @@ function ProvidersPageContent() {
                   </h2>
                   <button
                     onClick={() => handleBatchTest("web-cookie")}
-                    disabled={!!testingMode}
+                    disabled={!policyReady || !!testingMode}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                       testingMode === "web-cookie"
                         ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1276,7 +1343,7 @@ function ProvidersPageContent() {
                   </div>
                   <button
                     onClick={() => handleBatchTest("free")}
-                    disabled={!!testingMode}
+                    disabled={!policyReady || !!testingMode}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                       testingMode === "free"
                         ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1322,7 +1389,7 @@ function ProvidersPageContent() {
                   </h2>
                   <button
                     onClick={() => handleBatchTest("apikey")}
-                    disabled={!!testingMode}
+                    disabled={!policyReady || !!testingMode}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                       testingMode === "apikey"
                         ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1375,7 +1442,7 @@ function ProvidersPageContent() {
                   count={countConfigured(noAuthEntriesAll)}
                   blockedEntries={blockedNoAuthEntries}
                   blockedProviders={blockedProviders}
-                  onBlockedChange={setBlockedProviders}
+                  onBlockedChange={(next) => { if (policyReady) setBlockedProviders(next); }}
                   onError={(msg) => notify.error(msg)}
                   testingMode={testingMode}
                   onBatchTest={handleBatchTest}
@@ -1397,7 +1464,7 @@ function ProvidersPageContent() {
                   </h2>
                   <button
                     onClick={() => handleBatchTest("upstream-proxy")}
-                    disabled={!!testingMode}
+                    disabled={!policyReady || !!testingMode}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                       testingMode === "upstream-proxy"
                         ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1544,7 +1611,7 @@ function ProvidersPageContent() {
                   </h2>
                   <button
                     onClick={() => handleBatchTest("cloud-agent")}
-                    disabled={!!testingMode}
+                    disabled={!policyReady || !!testingMode}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                       testingMode === "cloud-agent"
                         ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1594,7 +1661,7 @@ function ProvidersPageContent() {
                   </h2>
                   <button
                     onClick={() => handleBatchTest("local")}
-                    disabled={!!testingMode}
+                    disabled={!policyReady || !!testingMode}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                       testingMode === "local"
                         ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1642,7 +1709,7 @@ function ProvidersPageContent() {
                   </h2>
                   <button
                     onClick={() => handleBatchTest("search")}
-                    disabled={!!testingMode}
+                    disabled={!policyReady || !!testingMode}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                       testingMode === "search"
                         ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1756,7 +1823,7 @@ function ProvidersPageContent() {
                   </h2>
                   <button
                     onClick={() => handleBatchTest("audio")}
-                    disabled={!!testingMode}
+                    disabled={!policyReady || !!testingMode}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                       testingMode === "audio"
                         ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -1825,21 +1892,24 @@ function ProvidersPageContent() {
           </>
         )}
 
+        </fieldset>
         <AddCompatibleProviderModal
-          isOpen={showAddCompatibleModal}
+          isOpen={policyReady && showAddCompatibleModal}
           mode="openai"
           onClose={() => setShowAddCompatibleModal(false)}
           onCreated={(node) => {
+            if (!policyReady) return;
             setProviderNodes((prev) => upsertProviderNodeById(prev, node));
             setShowAddCompatibleModal(false);
             router.push(`/dashboard/providers/${node.id}`);
           }}
         />
         <AddCompatibleProviderModal
-          isOpen={showAddAnthropicCompatibleModal}
+          isOpen={policyReady && showAddAnthropicCompatibleModal}
           mode="anthropic"
           onClose={() => setShowAddAnthropicCompatibleModal(false)}
           onCreated={(node) => {
+            if (!policyReady) return;
             setProviderNodes((prev) => upsertProviderNodeById(prev, node));
             setShowAddAnthropicCompatibleModal(false);
             router.push(`/dashboard/providers/${node.id}`);
@@ -1847,11 +1917,12 @@ function ProvidersPageContent() {
         />
         {ccCompatibleProviderEnabled && (
           <AddCompatibleProviderModal
-            isOpen={showAddCcCompatibleModal}
+            isOpen={policyReady && showAddCcCompatibleModal}
             mode="cc"
             title={addCcCompatibleLabel}
             onClose={() => setShowAddCcCompatibleModal(false)}
             onCreated={(node) => {
+            if (!policyReady) return;
               setProviderNodes((prev) => upsertProviderNodeById(prev, node));
               setShowAddCcCompatibleModal(false);
               router.push(`/dashboard/providers/${node.id}`);
@@ -1859,9 +1930,9 @@ function ProvidersPageContent() {
           />
         )}
         <ImportProvidersFromFileModal
-          isOpen={showImportFromFileModal}
+          isOpen={policyReady && showImportFromFileModal}
           onClose={() => setShowImportFromFileModal(false)}
-          onImported={async () => setConnections((await loadProviderPageData()).connections)}
+          onImported={async () => { if (policyReady) await refreshCore(); }}
         />
         {/* Test Results Modal */}
         {testResults && (

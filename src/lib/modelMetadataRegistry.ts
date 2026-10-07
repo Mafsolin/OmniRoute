@@ -208,6 +208,23 @@ export function getCatalogDiagnosticsHeaders(
   };
 }
 
+/** Per-build only: canonical resolution has no connection or auth scope.
+ * Repeated combo targets share the immutable capability snapshot, but callers
+ * receive independent metadata so one target cannot mutate another's result.
+ */
+export function createBuildLocalCanonicalMetadataResolver(
+  snapshot: ModelCapabilityResolutionSnapshot
+): (input: { provider?: string | null; model?: string | null }) => CanonicalModelMetadata | null {
+  const memo = new Map<string, CanonicalModelMetadata | null>();
+  return (input) => {
+    const key = JSON.stringify([input.provider || null, input.model || null]);
+    if (!memo.has(key)) {
+      memo.set(key, getCanonicalModelMetadata({ ...input, snapshot }));
+    }
+    return structuredClone(memo.get(key) ?? null);
+  };
+}
+
 export function getCanonicalModelMetadata(input: {
   provider?: string | null;
   model?: string | null;

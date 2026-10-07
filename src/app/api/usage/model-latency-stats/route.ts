@@ -53,6 +53,12 @@ export async function GET(request: Request) {
       entries: Object.values(statsByKey),
       windowHours: windowHours ?? 24,
       generatedAt: new Date().toISOString(),
+      measurement: {
+        ttft: "legacy-first-generated-output-or-first-event",
+        throughput: "reported-output-over-post-legacy-ttft",
+        includesReasoning: "provider-dependent",
+        historicalRowsReinterpreted: false,
+      },
     });
   } catch (error) {
     console.error("[API] GET /api/usage/model-latency-stats error:", error);

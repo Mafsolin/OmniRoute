@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "mode": "staging-gateway",
+  "startedAt": "2026-10-07T16:13:57.931Z",
+  "status": "blocked",
+  "waves": [],
+  "methodology": {
+    "simultaneous": "samples started while both client requests and synthetic upstream were active; slow completions are retained",
+    "percentile": "nearest-rank p95, sample count reported",
+    "usage": "synthetic provider fixture only",
+    "tps": null,
+    "limits": [
+      "not a live-provider availability or quality benchmark",
+      "not upstream inference throughput",
+      "internal Node worker/pending queues are not directly instrumented; active upstream sockets and replay counts only"
+    ]
+  },
+  "baseUrl": "http://127.0.0.1:20138",
+  "dataDir": "/opt/omniroute-quality-speed-stage-data",
+  "unit": {
+    "activeState": "failed",
+    "mainPID": "0"
+  },
+  "blocker": "staging not ready: unit failed",
+  "completedAt": "2026-10-07T16:13:58.149Z",
+  "requestCount": 0,
+  "failureCount": 0,
+  "waveCount": 0
+}

@@ -2,17 +2,20 @@
 
 // src/app/(dashboard)/dashboard/playground/components/tabs/ChatTab.tsx
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import MarkdownMessage from "../MarkdownMessage";
 import TokenCostCounter from "../TokenCostCounter";
 import { useStreamMetrics } from "../../hooks/useStreamMetrics";
+import { DeliveryTracker } from "@/lib/playground/deliveryMetrics";
 import { getModelPricing } from "@/lib/playground/types";
 import type { ConfigState } from "../StudioConfigPane";
 import type { StreamMetrics } from "@/shared/schemas/playground";
-import { buildReasoningRequestFields } from "../reasoningControlUtils";
+import { buildPlaygroundChatRequest } from "@/lib/playground/chatRequest";
+import { consumeChatStream, type ToolCall } from "@/lib/playground/consumeChatStream";
 import {
   buildNonChatRequestBody,
+  buildResponsesRequestBody,
   formatNonChatResponse,
   isChatCompletionsEndpoint,
   lastUserContent,
@@ -23,11 +26,59 @@ interface Message {
   role: "system" | "user" | "assistant";
   content: string;
   metrics?: StreamMetrics;
+  toolCalls?: ToolCall[];
+  events?: Array<{ event: string; payload: Record<string, unknown> }>;
 }
 
 interface ChatTabProps {
   configState: ConfigState;
   onMetricsUpdate?: (metrics: StreamMetrics) => void;
+}
+
+/** Frames retained for the debug inspector; the full log is capped so long streams stay linear. */
+const MAX_INSPECTOR_EVENTS = 2000;
+/** The inspector updates at most this often; re-serializing a growing log every frame is quadratic. */
+const INSPECTOR_FLUSH_MS = 250;
+
+/**
+ * Response inspector — renders raw SSE frames only after the user opens it, so an
+ * in-flight stream never pays JSON.stringify + a growing DOM node on every delta.
+ */
+function ResponseInspector({
+  events,
+  toolCalls,
+}: {
+  events?: Array<{ event: string; payload: Record<string, unknown> }>;
+  toolCalls?: ToolCall[];
+}) {
+  const t = useTranslations("playground");
+  const [open, setOpen] = useState(false);
+  const eventsJson = useMemo(() => (open ? JSON.stringify(events ?? [], null, 2) : ""), [open, events]);
+  const toolsJson = useMemo(() => (open ? JSON.stringify(toolCalls ?? [], null, 2) : ""), [open, toolCalls]);
+  return (
+    <details className="mt-1 w-full text-xs text-text-muted" open={open}>
+      <summary
+        className="cursor-pointer"
+        onClick={(event) => {
+          event.preventDefault();
+          setOpen((value) => !value);
+        }}
+      >
+        {t("responseInspector")}
+      </summary>
+      {(toolCalls?.length ?? 0) > 0 && (
+        <>
+          <p>{t("toolHandoff")}</p>
+          <pre data-testid="chat-tool-calls" className="whitespace-pre-wrap break-all">
+            {toolsJson}
+          </pre>
+        </>
+      )}
+      <pre data-testid="chat-response-events" className="whitespace-pre-wrap break-all">
+        {eventsJson}
+      </pre>
+    </details>
+  );
 }
 
 /**
@@ -50,6 +101,16 @@ export default function ChatTab({ configState, onMetricsUpdate }: ChatTabProps) 
   const [responseDuration, setResponseDuration] = useState<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const clearedRef = useRef(false);
+
+  /** Applies a patch to one assistant message; a cleared chat is never repopulated by an old stream. */
+  const patchAssistant = (index: number, patch: Partial<Message>) =>
+    setMessages((prev) => {
+      if (index < 0 || index >= prev.length || prev[index]?.role !== "assistant") return prev;
+      const next = [...prev];
+      next[index] = { ...next[index], ...patch };
+      return next;
+    });
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -73,35 +134,8 @@ export default function ChatTab({ configState, onMetricsUpdate }: ChatTabProps) 
     return out;
   }
 
-  // Build the request body from configState + messages
   function buildRequestBody(chatMessages: Message[]): Record<string, unknown> {
-    const body: Record<string, unknown> = {
-      model: configState.model,
-      messages: buildApiMessages(chatMessages),
-      stream: true,
-    };
-
-    const p = configState.params;
-    if (p.temperature !== 1.0) body.temperature = p.temperature;
-    if (p.max_tokens !== 1024) body.max_tokens = p.max_tokens;
-    if (p.top_p !== 1.0) body.top_p = p.top_p;
-    if (p.presence_penalty !== 0) body.presence_penalty = p.presence_penalty;
-    if (p.frequency_penalty !== 0) body.frequency_penalty = p.frequency_penalty;
-    if (p.seed !== null) body.seed = p.seed;
-    if (p.stop.trim()) body.stop = p.stop;
-    if (p.jsonMode) body.response_format = { type: "json_object" };
-
-    // #6241: fold the canonical effort / thinking params onto the body — gated to models that
-    // support thinking (via the resolved reasoning spec) and to valid effort tiers.
-    Object.assign(
-      body,
-      buildReasoningRequestFields(
-        { effort: p.effort, thinking: p.thinking },
-        configState.reasoning ?? { show: false, effortOptions: [] }
-      )
-    );
-
-    return body;
+    return buildPlaygroundChatRequest(configState, chatMessages);
   }
 
   const doSend = async (chatMessages: Message[], appendIndex?: number) => {
@@ -116,9 +150,11 @@ export default function ChatTab({ configState, onMetricsUpdate }: ChatTabProps) 
 
     const controller = new AbortController();
     abortRef.current = controller;
+    clearedRef.current = false;
     const startTime = Date.now();
 
     streamMetrics.start();
+    const tracker = new DeliveryTracker();
 
     // If regenerating, replace the last assistant message; otherwise append
     const targetIndex = appendIndex ?? chatMessages.length;
@@ -134,9 +170,14 @@ export default function ChatTab({ configState, onMetricsUpdate }: ChatTabProps) 
 
     try {
       const fetchHeaders: Record<string, string> = { "Content-Type": "application/json" };
-      const chatEndpoint = isChatCompletionsEndpoint(configState.endpoint);
-      const requestBody = chatEndpoint
-        ? buildRequestBody(chatMessages)
+      const isResponses = configState.endpoint === "responses";
+      const streamingConversation = isChatCompletionsEndpoint(configState.endpoint) || isResponses;
+      const requestBody = isResponses
+        ? buildResponsesRequestBody(buildApiMessages(chatMessages), configState.model,
+            configState.params,
+            { effort: configState.params.effort, thinking: configState.params.thinking },
+            configState.reasoning ?? { show: false, effortOptions: [] })
+        : streamingConversation ? buildRequestBody(chatMessages)
         : buildNonChatRequestBody(
             configState.endpoint,
             lastUserContent(chatMessages),
@@ -165,86 +206,62 @@ export default function ChatTab({ configState, onMetricsUpdate }: ChatTabProps) 
         return;
       }
 
-      if (!chatEndpoint) {
+      if (!streamingConversation) {
         const rawText = await res.text();
-        setMessages((prev) => {
-          const next = [...prev];
-          const idx = appendIndex !== undefined ? appendIndex : next.length - 1;
-          next[idx] = { ...next[idx], content: formatNonChatResponse(rawText) };
-          return next;
-        });
+        patchAssistant(targetIndex, { content: formatNonChatResponse(rawText) });
         setResponseDuration(Date.now() - startTime);
         setLoading(false);
         streamMetrics.reset();
         return;
       }
 
-      let firstChunk = true;
-      const reader = res.body?.getReader();
-      const decoder = new TextDecoder();
+      if (!res.body) throw new Error(t("noResponseBody"));
       let assistantResponse = "";
-      let usageData: { prompt_tokens?: number; completion_tokens?: number } | undefined;
+      const events: Array<{ event: string; payload: Record<string, unknown> }> = [];
+      let lastFlushAt = 0;
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      const flushEvents = () => {
+        lastFlushAt = Date.now();
+        if (flushTimer !== null) { clearTimeout(flushTimer); flushTimer = null; }
+        patchAssistant(targetIndex, { events: events.slice(-MAX_INSPECTOR_EVENTS) });
+      };
+      const scheduleEventsFlush = () => {
+        const elapsed = Date.now() - lastFlushAt;
+        if (elapsed >= INSPECTOR_FLUSH_MS) flushEvents();
+        else if (flushTimer === null) flushTimer = setTimeout(flushEvents, INSPECTOR_FLUSH_MS - elapsed);
+      };
+      const result = await consumeChatStream(res.body, {
+        onFrame: (event, payload) => {
+          events.push({ event, payload });
+          scheduleEventsFlush();
+        },
+        onTools: toolCalls => { tracker.tool(); patchAssistant(targetIndex, { toolCalls }); },
+        onEvent: () => tracker.event(),
+        onReasoning: () => tracker.reasoning(),
+        onText: (delta) => {
+          assistantResponse += delta;
+          tracker.text();
+          patchAssistant(targetIndex, { content: assistantResponse });
+        },
+      }, controller.signal);
+      if (flushTimer !== null) { clearTimeout(flushTimer); flushTimer = null; }
+      flushEvents();
+      const usageData = result.usage;
+      if (result.finishReason === "length" && !result.hasText && !result.hasTools && result.hasReasoning) setError(t("reasoningLimitReached"));
+      else if (result.finishReason === "length") setError(t("outputLimitReached"));
+      else if (result.finishReason === "content_filter") setError(t("outputFiltered"));
 
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          if (firstChunk) {
-            streamMetrics.onFirstChunk();
-            firstChunk = false;
-          }
-
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split("\n");
-
-          for (const line of lines) {
-            if (line === "data: [DONE]") continue;
-            if (line.startsWith("data: ")) {
-              try {
-                const parsed = JSON.parse(line.slice(6)) as {
-                  choices?: Array<{ delta?: { content?: string } }>;
-                  usage?: { prompt_tokens?: number; completion_tokens?: number };
-                };
-                const delta = parsed.choices?.[0]?.delta?.content ?? "";
-                if (delta) {
-                  assistantResponse += delta;
-                  streamMetrics.onChunk(1);
-                  setMessages((prev) => {
-                    const next = [...prev];
-                    const idx = appendIndex !== undefined ? appendIndex : next.length - 1;
-                    next[idx] = { ...next[idx], content: assistantResponse };
-                    return next;
-                  });
-                }
-                if (parsed.usage) {
-                  usageData = parsed.usage;
-                }
-              } catch {
-                // ignore parse errors for partial chunks
-              }
-            }
-          }
-        }
-      }
-
-      streamMetrics.finish(usageData);
-      // metrics state will update asynchronously; snapshot from refs via computeMetrics directly
-      const metricsSnapshot = streamMetrics.metrics;
+      const metricsSnapshot = tracker.finish(usageData, pricing ? { ...pricing, estimated: true } : undefined);
+      streamMetrics.apply(metricsSnapshot);
 
       // Attach metrics to the assistant message
-      setMessages((prev) => {
-        const next = [...prev];
-        const idx = appendIndex !== undefined ? appendIndex : next.length - 1;
-        next[idx] = { ...next[idx], metrics: metricsSnapshot };
-        return next;
-      });
+      patchAssistant(targetIndex, { metrics: metricsSnapshot });
 
       onMetricsUpdate?.(metricsSnapshot);
     } catch (err: unknown) {
       const e = err as { name?: string; message?: string };
       if (e.name === "AbortError") {
-        setError(t("requestCancelled"));
+        if (!clearedRef.current) setError(t("requestCancelled"));
       } else {
         setError(e.message ?? t("networkError"));
       }
@@ -286,6 +303,10 @@ export default function ChatTab({ configState, onMetricsUpdate }: ChatTabProps) 
   };
 
   const handleClear = () => {
+    // An in-flight stream must not keep writing into a chat that no longer holds its message.
+    clearedRef.current = true;
+    abortRef.current?.abort();
+    abortRef.current = null;
     setMessages([]);
     setError(null);
     setResponseStatus(null);
@@ -382,6 +403,9 @@ export default function ChatTab({ configState, onMetricsUpdate }: ChatTabProps) 
                   <span className="whitespace-pre-wrap">{msg.content}</span>
                 )}
               </div>
+              {msg.role === "assistant" && (msg.events?.length ?? 0) > 0 && (
+                <ResponseInspector events={msg.events} toolCalls={msg.toolCalls} />
+              )}
               {/* Token/cost per message */}
               {msg.role === "assistant" && msg.metrics && (
                 <div className="mt-1 px-1">

@@ -1,0 +1,9 @@
+[Unit]
+Description=OmniRoute daily off-process DB integrity check
+[Timer]
+OnCalendar=*-*-* 04:20:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=omniroute-db-integrity.service
+[Install]
+WantedBy=timers.target

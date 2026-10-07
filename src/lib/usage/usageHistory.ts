@@ -8,6 +8,7 @@
  */
 
 import { getDbInstance } from "../db/core";
+import { getUsageStatsReader } from "./usageStatsReader";
 import { protectPayloadForLog } from "../logPayloads";
 import {
   resolveOrphanedUsageAccountIdentity,
@@ -838,7 +839,7 @@ export async function getModelLatencyStats(
   const minSamples = resolvePositiveOption(options.minSamples, 1);
   const maxRows = resolvePositiveOption(options.maxRows, 10000);
 
-  const db = getDbInstance();
+  getDbInstance(); // Initialize the file/schema before the read-only worker opens it.
   const sinceIso = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
 
   type LatencyRow = {
@@ -861,17 +862,16 @@ export async function getModelLatencyStats(
     queryParams.model = options.model;
   }
 
-  const rows = db
-    .prepare(
-      `
+  const rows = await getUsageStatsReader().all<LatencyRow>(
+    `
       SELECT provider, model, success, latency_ms, ttft_ms, tokens_output
       FROM usage_history
       WHERE ${conditions.join(" AND ")}
       ORDER BY timestamp DESC
       LIMIT @maxRows
-    `
-    )
-    .all(queryParams) as LatencyRow[];
+    `,
+    [queryParams]
+  );
 
   const grouped = new Map<string, ReturnType<typeof createLatencyBucket>>();
 

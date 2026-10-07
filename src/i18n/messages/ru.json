@@ -11131,7 +11131,13 @@
       "nextButton": "Далее",
       "runButton": "Запустить",
       "promptPlaceholder": "Введите ваше сообщение… (Enter для отправки, Shift+Enter для новой строки)"
-    }
+    },
+    "firstTextTitle": "От отправки запроса до первого текста; без heartbeat и рассуждений",
+    "deliveryTpsTitle": "Скорость доставки токенов ответа, не вычислений upstream",
+    "burstDelivery": "пакетная выдача",
+    "tpsUnavailable": "TPS: нет данных",
+    "responseInspector": "Инспектор ответа",
+    "toolHandoff": "Вызовы инструментов (не выполнены)"
   },
   "miniPlayground": {
     "endpoint": "Конечная точка",

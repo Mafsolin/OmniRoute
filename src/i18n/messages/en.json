@@ -11138,7 +11138,13 @@
       "nextButton": "Next",
       "runButton": "Run",
       "promptPlaceholder": "Enter your message… (Enter to send, Shift+Enter for newline)"
-    }
+    },
+    "firstTextTitle": "Time from request dispatch to first visible text, excluding heartbeats and reasoning",
+    "deliveryTpsTitle": "Visible token delivery rate; not upstream inference speed",
+    "burstDelivery": "burst delivery",
+    "tpsUnavailable": "TPS unavailable",
+    "responseInspector": "Response inspector",
+    "toolHandoff": "Tool handoff (not executed)"
   },
   "miniPlayground": {
     "endpoint": "Endpoint",

@@ -1,0 +1,12 @@
+[Unit]
+Description=OmniRoute read-only SQLite integrity scan outside serving event loop
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/omniroute-db-integrity.py
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=2h
+MemoryMax=256M
+PrivateTmp=true
+NoNewPrivileges=true
