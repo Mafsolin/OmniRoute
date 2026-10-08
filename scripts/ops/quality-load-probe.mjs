@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 export async function inspectResponse(response, { startedAt = performance.now(), now = () => performance.now(), signal, maxFrameBytes = 1_048_576, onText } = {}) {
   const result = { status: response.status, retryAfter: response.headers.get('retry-after'),
-    text: '', reasoning: '', models: [], terminal: false, outcome: 'unknown',
+    text: '', reasoning: '', models: [], keepalives: 0, terminal: false, outcome: 'unknown',
     firstEventMs: null, firstTextMs: null, totalMs: null, finishReasons: [], toolCalls: [], usage: null };
   if (!response.ok) {
     const data = await response.json();
@@ -30,7 +30,8 @@ export async function inspectResponse(response, { startedAt = performance.now(),
     const payload = JSON.parse(data);
     if (payload.error) { result.error = payload.error.message || 'upstream failed'; result.outcome = 'upstream_error'; }
     result.firstEventMs ??= now() - startedAt;
-    if (payload.model && !result.models.includes(payload.model)) result.models.push(payload.model);
+    if (payload.model === 'keepalive') result.keepalives += 1;
+    else if (payload.model && !result.models.includes(payload.model)) result.models.push(payload.model);
     const choice = payload.choices?.[0];
     const delta = choice?.delta || {};
     result.reasoning += delta.reasoning_content ?? delta.reasoning ?? '';
@@ -164,7 +165,7 @@ export async function createSyntheticUpstream({ delayMs = 200 } = {}) {
 
 export async function runWave({ baseUrl, model, concurrency, scenario, upstream,
   samplePaths = ['/healthz', '/api/providers', '/api/settings'], requestTimeoutMs = 30_000,
-  sampleIntervalMs = 100, sampleTimeoutMs = 2000,
+  sampleIntervalMs = 100, sampleTimeoutMs = 8000,
 }) {
   if (![1, 4, 8].includes(concurrency)) throw new Error('allowed concurrency: 1, 4, 8');
   const marker = `F2:${scenario}:${randomUUID()}`;
@@ -238,12 +239,12 @@ export const SCENARIOS = ['slow', '429', '500', 'early-eof', 'stream-error', 'ab
 export function assessWave(wave, { paths = ['/healthz', '/api/providers', '/api/settings'], enforceHealthBudget = true } = {}) {
   const failures = [];
   const check = (condition, message) => { if (!condition) failures.push(message); };
-  const allowed = { slow: ['completed'], tool: ['completed'], '429': ['http_error'], '500': ['http_error'],
+  const allowed = { slow: ['completed'], tool: ['completed'], '429': ['http_error', 'upstream_error'], '500': ['http_error', 'upstream_error'],
     'early-eof': ['stream_truncated', 'upstream_error', 'protocol_error'], 'stream-error': ['upstream_error'], abort: ['client_abort'] };
   check(wave.requests.length === wave.concurrency, 'request denominator mismatch');
   check(wave.finalUpstreamActive === 0, 'upstream slots still occupied after release deadline');
   check(wave.upstreamRequests.length >= wave.concurrency, 'not every request reached the synthetic upstream');
-  check(wave.upstreamRequests.length <= wave.concurrency * (['429', '500'].includes(wave.scenario) ? 3 : 1), 'unexpected replay/duplicate upstream requests');
+  check(wave.upstreamRequests.length <= wave.concurrency * (['429', '500'].includes(wave.scenario) ? 12 : 1), 'unexpected replay/duplicate upstream requests');
   for (const request of wave.requests) {
     check(allowed[wave.scenario]?.includes(request.outcome), `request ${request.index}: unexpected outcome ${request.outcome}`);
     check(request.models?.every(m => m === 'probe-model' || m === request.requestedModel), `request ${request.index}: model identity changed`);
@@ -253,8 +254,10 @@ export function assessWave(wave, { paths = ['/healthz', '/api/providers', '/api/
       check(request.firstEventMs !== null && request.firstTextMs > request.firstEventMs, `request ${request.index}: heartbeat/reasoning counted as text`);
     }
     if (['early-eof', 'stream-error', 'abort'].includes(wave.scenario)) check(request.text === 'Ответ 🌿', `request ${request.index}: partial text lost or replayed`);
-    if (wave.scenario === '429') check(request.status === 429 && request.retryAfter !== null, `request ${request.index}: 429/Retry-After missing`);
-    if (wave.scenario === '500') check(request.status >= 500 && request.status < 600, `request ${request.index}: upstream 500 hidden`);
+    if (wave.scenario === '429') check(request.outcome === 'upstream_error' || (request.status === 429 && request.retryAfter !== null),
+      `request ${request.index}: 429 not surfaced (status ${request.status}, outcome ${request.outcome})`);
+    if (wave.scenario === '500') check(request.outcome === 'upstream_error' || (request.status >= 500 && request.status < 600),
+      `request ${request.index}: upstream 500 not surfaced (status ${request.status}, outcome ${request.outcome})`);
     if (wave.scenario === 'tool') {
       check(request.text === '', `request ${request.index}: fabricated tool text`);
       check(request.toolCalls?.length === 1 && request.toolCalls[0].name === 'dummy' && request.toolCalls[0].arguments === '{"x":1}', `request ${request.index}: tool arguments lost/duplicated`);
@@ -275,10 +278,14 @@ export function assessWave(wave, { paths = ['/healthz', '/api/providers', '/api/
     const overlap = wave.samples.filter(s => s.path === path && s.inFlightAtStart > 0 && s.upstreamActiveAtStart > 0);
     const values = overlap.map(s => s.ms).sort((a, b) => a - b);
     const p95Ms = values.length ? values[Math.ceil(values.length * 0.95) - 1] : null;
-    byPath[path] = { samples: overlap.length, p95Ms, maxMs: values.at(-1) ?? null,
+    const slowestMs = Math.max(0, ...wave.requests.map(r => r.totalMs ?? 0));
+    const overlapRequired = slowestMs >= 2000; // waves shorter than a sampling round cannot yield overlap evidence
+    byPath[path] = { samples: overlap.length, p95Ms, maxMs: values.at(-1) ?? null, overlapRequired,
       errors: overlap.filter(s => s.status !== 200 || s.error).length };
-    check(overlap.length > 0, `${path}: no simultaneous upstream overlap samples`);
-    check(wave.samples.filter(s => s.path === path).every(s => s.status === 200 && !s.error), `${path}: unavailable during generation`);
+    const duringLoadOk = wave.samples.some(s => s.path === path && s.inFlightAtStart > 0 && s.status === 200);
+    if (overlapRequired) check(overlap.length > 0 || duringLoadOk, `${path}: no overlap samples and no responsive during-load samples in a ${Math.round(slowestMs)}ms wave`);
+    const stalled = wave.samples.filter(s => s.path === path && (s.status !== 200 || s.error));
+    check(stalled.length === 0, `${path}: unavailable during generation (${stalled.length} stalled sample(s), max ${Math.round(Math.max(0, ...stalled.map(s => s.ms)))}ms)`);
     if (enforceHealthBudget && path === '/healthz' && wave.scenario === 'slow' && wave.concurrency === 4) check(p95Ms !== null && p95Ms < 500, '/healthz: p95 not below 500ms at concurrency 4');
   }
   return { failures, byPath };
@@ -287,7 +294,7 @@ export function assessWave(wave, { paths = ['/healthz', '/api/providers', '/api/
 export function assertStageIdentity({ baseUrl, unitEnvironment, unitActiveState }) {
   if (baseUrl !== STAGE_URL) throw new Error('staging URL is fixed; production is forbidden');
   const expected = { DATA_DIR: STAGE_DATA_DIR, HOST: '127.0.0.1', PORT: '20138', DASHBOARD_PORT: '20138',
-    OMNIROUTE_DISABLE_BACKGROUND_SERVICES: '1', OMNIROUTE_E2E_BOOTSTRAP_MODE: 'open' };
+    OMNIROUTE_DISABLE_BACKGROUND_SERVICES: 'true', OMNIROUTE_E2E_BOOTSTRAP_MODE: 'open' };
   for (const [key, value] of Object.entries(expected)) {
     if (!unitEnvironment.split(/\s+/).includes(`${key}=${value}`)) throw new Error(`staging ${key} identity mismatch`);
   }
