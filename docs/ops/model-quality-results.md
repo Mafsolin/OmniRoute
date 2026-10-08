@@ -4,7 +4,7 @@ title: "Model quality probe results (D3)"
 
 # Model quality probe results — bounded synthetic live runs
 
-Generated: 2026-10-08T10:18:18.417062+00:00 • Probe: `scripts/ops/model-quality-probe.py` • Base: `https://api.mafsolin.space`
+Generated: 2026-10-08T10:32:39.674917+00:00 • Probe: `scripts/ops/model-quality-probe.py` • Base: `https://api.mafsolin.space`
 
 Objective smoke checks per case (strict JSON shape, duplicate-preserving sort, synthetic facts with negation, word count / long-context recall / code edge cases). Live budget respected: one model per run first, concurrency=1; failed runs kept below.
 
@@ -14,10 +14,20 @@ Objective smoke checks per case (strict JSON shape, duplicate-preserving sort, s
 | json_probe | antigravity/gemini-3.7-flash-high | 768 | 200 | PASS | stop | 12.73 | 0.014 | 0.011 | 3699 | 3482 | — | — | gemini-3.7-flash-tiered |
 | json_probe | antigravity/gemini-3.8-flash-tiered | 768 | 200 | PASS | stop | 26.752 | 1.055 | 1.055 | 3498 | 3324 | 165.0 | 3316.2 | gemini-3.8-flash-tiered |
 | code_fix | antigravity/claude-sonnet-4-6 | 768 | 200 | PASS | stop | 6.327 | 0.009 | 0.009 | 76 | — | — | — | claude-sonnet-4-6 |
+| code_fix | antigravity/gemini-3.7-flash-high | 768 | 200 | PASS | stop | 9.532 | 0.0 | 0.0 | 1612 | 1545 | — | — | gemini-3.7-flash-tiered |
+| code_fix | antigravity/gemini-3.8-flash-tiered | 768 | 200 | FAIL | — | — | 0.0 | 0.0 | — | — | — | — | gemini-3.8-flash-tiered |
 | code_fix | opencode-go/deepseek-flash | 4096 | 200 | PASS | stop | 24.263 | 0.223 | 0.223 | 2621 | — | — | — | deepseek-flash |
 | code_fix | opencode-go/deepseek-flash | 768 | 200 | FAIL | length | — | 0.0 | 0.0 | 768 | — | — | — | deepseek-flash |
+| code_fix | antigravity/gemini-3.8-flash-tiered | 768 | 200 | PASS | stop | 115.707 | 0.0 | 0.0 | 13841 | 13774 | — | — | gemini-3.8-flash-tiered |
+| json_probe | antigravity/claude-sonnet-4-6 | 4096 | 200 | PASS | stop | 6.822 | 6.11 | 3.243 | 224 | — | — | 36.7 | claude-sonnet-4-6 |
+| json_probe | opencode-go/deepseek-flash | 4096 | 200 | PASS | stop | 13.826 | 0.815 | 0.462 | 1018 | — | — | 1249.7 | deepseek-flash |
+| json_probe | antigravity/gemini-3.7-flash-high | 4096 | 200 | PASS | stop | 14.782 | 0.262 | 0.249 | 2822 | 2594 | 870.2 | 10770.1 | gemini-3.7-flash-tiered |
+| json_probe | antigravity/gemini-3.8-flash-tiered | 4096 | 200 | PASS | stop | 29.195 | 0.309 | 0.308 | 3521 | 3318 | 657.9 | 11410.4 | gemini-3.8-flash-tiered |
 | json_probe | opencode-go/deepseek-flash | 4096 | 200 | PASS | stop | 15.582 | 2.325 | 1.044 | 1132 | — | — | 486.9 | deepseek-flash |
 | long_context | opencode-go/deepseek-flash | 4096 | 200 | PASS | stop | 6.444 | 0.736 | 0.722 | 66 | — | — | 89.7 | deepseek-flash |
+| long_context | antigravity/claude-sonnet-4-6 | 4096 | 200 | PASS | stop | 3.904 | 0.0 | 0.0 | 22 | — | — | — | claude-sonnet-4-6 |
+| long_context | antigravity/gemini-3.7-flash-high | 4096 | 200 | PASS | stop | 5.062 | 0.0 | 0.0 | 153 | 135 | — | — | gemini-3.7-flash-tiered |
+| long_context | antigravity/gemini-3.8-flash-tiered | 4096 | 200 | PASS | stop | 7.504 | 0.0 | 0.0 | 169 | 151 | — | — | gemini-3.8-flash-tiered |
 | json_probe | opencode-go/deepseek-flash | 768 | 200 | FAIL | length | — | 0.0 | 0.0 | 768 | — | — | — | deepseek-flash |
 
 ## Observations

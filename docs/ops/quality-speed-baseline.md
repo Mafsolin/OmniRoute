@@ -31,6 +31,7 @@ New regression omni-standalone-stats failed with assembled worker null before ch
 - `tests/unit` latency-stats-ttft-6875: expected TPS 64.06, fixture computes 70.31 (investigate separately before claiming regressions).
 - `tests/integration/combo-matrix/ordered|fusion|quota-aware|weighted`: fixtures referenced `claude-3-5-sonnet-20241022`, which the router answers 410 for ("was shut down on 2025-10-28 and cannot be routed automatically"); modernized to `claude-sonnet-4.6` on this branch (D1), same failures reproduced at 8bb49dd83 before the change.
 - `tests/integration/combo-matrix/context-relay-handoff` tests 1-2 (universal handoff write): fail identically at 8bb49dd83; tracked separately, not a delivery regression.
+- `tests/unit/image-routes-combo-edits-3214-3215.test.ts` test 9 (bare combos shadow built-in image aliases): fails identically at 8bb49dd83; pre-existing, not a delivery regression.
 
 ## Actual external Chromium baseline (VPS browser, not user PC)
 

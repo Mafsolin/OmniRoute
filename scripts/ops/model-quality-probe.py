@@ -364,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--key-name", default=DEFAULT_KEY_NAME)
     parser.add_argument("--report", default=None, help="write JSON report to this path (never contains the key)")
     parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, help="overall per-request deadline, seconds")
     args = parser.parse_args(argv)
 
     if args.case == "tool_advertised":
@@ -382,12 +383,12 @@ def main(argv: list[str] | None = None) -> int:
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(args.concurrency, 4)) as pool:
-                futures = [pool.submit(run_case, base_url=args.base_url, key=key, model=m, case=args.case, max_output=max_output, timeout_s=DEFAULT_TIMEOUT_S) for m in models]
+                futures = [pool.submit(run_case, base_url=args.base_url, key=key, model=m, case=args.case, max_output=max_output, timeout_s=args.timeout) for m in models]
                 for future in concurrent.futures.as_completed(futures):
                     results.append(future.result())
         else:
             for model in models:
-                results.append(run_case(base_url=args.base_url, key=key, model=model, case=args.case, max_output=max_output, timeout_s=DEFAULT_TIMEOUT_S))
+                results.append(run_case(base_url=args.base_url, key=key, model=model, case=args.case, max_output=max_output, timeout_s=args.timeout))
         report = {
             "case": args.case,
             "base_url": args.base_url,
