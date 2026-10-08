@@ -197,9 +197,10 @@ async function buildHistoryContext(body: JsonRecord): Promise<ResponsesWsHistory
 }
 
 function buildCallLogEntry(body: JsonRecord, context: ResponsesWsHistoryContext): JsonRecord {
+  const terminalResponse = context.terminalMessage?.response as JsonRecord | undefined;
   const responseId =
     toStringOrNull(context.responseBody?.id) ||
-    toStringOrNull(context.terminalMessage?.response?.id);
+    toStringOrNull(terminalResponse?.id);
   return {
     // New proxy payloads carry a unique ID for every logical turn. Keep the
     // session ID fallback for older standalone proxies during rolling deploys.

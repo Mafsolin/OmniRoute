@@ -2640,9 +2640,11 @@ async function handleCodexImageGeneration({
         });
       }
 
+      const directRecord =
+        directJson && typeof directJson === "object" ? (directJson as Record<string, unknown>) : null;
       const data =
-        directJson && typeof directJson === "object" && Array.isArray(directJson.data)
-          ? (directJson.data as Array<Record<string, unknown>>)
+        directRecord && Array.isArray(directRecord.data)
+          ? (directRecord.data as Array<Record<string, unknown>>)
           : [];
       if (data.length === 0) {
         return saveImageErrorResult({
