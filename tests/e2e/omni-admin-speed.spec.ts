@@ -45,7 +45,7 @@ test("unavailable settings policy leaves readable cards but disables mutations",
   await page.route("**/api/providers/openrouter-stats", (route) => route.fulfill({ json: { data: [] } }));
   await page.goto("/dashboard/providers?cat=compatible", { waitUntil: "domcontentloaded" });
   await expect(page.getByText(fixtureName, { exact: true })).toBeVisible();
-  await expect(page.getByRole("alert")).toContainText(/policy|политик/i);
+  await expect(page.getByRole("alert").filter({ hasText: /policy|политик/i })).toContainText(/policy|политик/i);
   await expect(page.getByRole("button", { name: /Import from file|Импорт из файла/i })).toBeDisabled();
   await expect(page.getByRole("button", { name: /Try Again|Повторить/i })).toBeEnabled();
 });
@@ -58,7 +58,7 @@ test("401 provider reads show Retry instead of false empty onboarding", async ({
     : { json: { connections } }));
   await page.route("**/api/providers/openrouter-stats", (route) => route.fulfill({ json: { data: [] } }));
   await page.goto("/dashboard/providers?cat=compatible", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("alert")).toContainText("401");
+  await expect(page.getByRole("alert").filter({ hasText: "401" })).toContainText("401");
   await expect(page.getByText(/Add your first provider|Добавьте первого провайдера/i)).toHaveCount(0);
   unavailable = false;
   await page.getByRole("button", { name: /Try Again|Повторить/i }).click();
