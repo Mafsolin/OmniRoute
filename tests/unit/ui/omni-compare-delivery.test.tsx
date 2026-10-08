@@ -64,3 +64,18 @@ it("Compare retains full partial UTF-8 output and reports an in-stream error", a
   expect(screen.getByText("Частичный 🌿", { exact: true })).toBeTruthy();
   expect(f.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });
+
+it("runs Compare for a model with unconfirmed capabilities when no reasoning params are set", async () => {
+  const f = network();
+  f.mockImplementation(async (_url, init) => init?.method ? new Response(event({ choices: [{ delta: { content: "ok" } }] }) + event({ choices: [{ delta: {}, finish_reason: "stop" }] }) + "data: [DONE]\n\n") : Response.json({ data: [{ id: "test/one" }] }));
+  const cfg: ConfigState = { ...config, params: { ...config.params, effort: "", thinking: false } };
+  render(<CompareTab configState={cfg} />);
+  await act(async () => {});
+  await run();
+  expect(f.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  const post = f.mock.calls.find(([, init]) => init?.method === "POST")!;
+  const body = JSON.parse(post[1]!.body as string);
+  expect(body.effort).toBeUndefined();
+  expect(body.thinking).toBeUndefined();
+  expect(screen.queryByText(/modelParametersUnconfirmed/)).toBeNull();
+});

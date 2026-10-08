@@ -157,7 +157,7 @@ export default function CompareTab({ configState }: CompareTabProps) {
   async function streamColumn(col: ColumnState): Promise<void> {
     const capabilities = modelCapabilities[col.model];
     const spec = resolveReasoningControls(capabilities);
-    if (loadingModels || typeof capabilities?.supportsThinking !== "boolean" ||
+    if (loadingModels ||
         (configState.params.effort && (!spec.show || !spec.effortOptions.includes(configState.params.effort))) ||
         (configState.params.thinking && !spec.show)) {
       updateColumn(col.id, { status: "error", errorMessage: t("modelParametersUnconfirmed") });
