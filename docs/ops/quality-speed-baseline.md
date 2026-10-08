@@ -1,3 +1,7 @@
+---
+title: "Quality & Speed Baseline (2026-10-07)"
+---
+
 # Baseline: quality/speed work
 
 ## Verified scope
