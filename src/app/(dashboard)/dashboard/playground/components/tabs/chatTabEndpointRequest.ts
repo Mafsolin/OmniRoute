@@ -63,7 +63,8 @@ export function formatNonChatResponse(rawText: string): string {
   try {
     const parsed = JSON.parse(rawText) as unknown;
     const body = JSON.stringify(parsed, null, 2);
-    const longestRun = (body.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
+    const backtickRuns: string[] = body.match(/`+/g) ?? [];
+    const longestRun = backtickRuns.reduce((max: number, run: string) => Math.max(max, run.length), 0);
     const fence = "`".repeat(Math.max(3, longestRun + 1));
     return `${fence}json\n${body}\n${fence}`;
   } catch {
