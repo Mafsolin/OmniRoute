@@ -156,6 +156,24 @@ export function getConnectionScopedEffortTiers(
   return intersectStringArrays(efforts);
 }
 
+/**
+ * #8327 single source: resolve the PUBLIC prefix a compatible provider node
+ * publishes its models under. The unified catalog maps node.id -> this prefix
+ * for the public `owned_by` field (resolvePublicOwnerId); consumers that filter
+ * catalog entries by provider (e.g. /v1/providers/[provider]/models) must use
+ * the same value instead of the raw node id.
+ */
+export function resolveProviderNodePrefix(
+  node: { prefix?: unknown; name?: unknown } | null | undefined
+): string | null {
+  const prefix = typeof node?.prefix === "string" ? node.prefix.trim() : "";
+  if (prefix) return prefix;
+  const name = typeof node?.name === "string" ? node.name.trim().toLowerCase() : "";
+  if (!name) return null;
+  const slug = name.replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+  return slug || null;
+}
+
 export function getThinkingCapabilityFields(
   providerId: string,
   modelId: string,

@@ -1,4 +1,6 @@
 import { getUnifiedModelsResponse } from "@/app/api/v1/models/catalog";
+import { resolveProviderNodePrefix } from "@/app/api/v1/models/catalogHelpers";
+import { getProviderNodeById } from "@/lib/db/providers";
 import { getServiceModels } from "@/lib/db/serviceModels";
 import { isServiceBackendPluginId } from "@/lib/services/serviceBackends";
 import { getRegistryEntry } from "@omniroute/open-sse/config/providerRegistry.ts";
@@ -68,6 +70,15 @@ export async function GET(request: Request, { params }: { params: Promise<{ prov
     }
   }
 
+  // #8327: compatible nodes publish their models under the node PREFIX in the
+  // catalog's public `owned_by` field — resolve the same public key here so the
+  // filter below can match (filtering by the raw node id returned []).
+  let catalogOwnerKey: string | null = null;
+  if (isCompatibleProviderConnectionId(rawProvider)) {
+    const node = await getProviderNodeById(rawProvider).catch(() => null);
+    catalogOwnerKey = resolveProviderNodePrefix(node);
+  }
+
   const response = await getUnifiedModelsResponse(request);
   const payload = (await response
     .clone()
@@ -86,10 +97,15 @@ export async function GET(request: Request, { params }: { params: Promise<{ prov
     if (!id) return id;
     if (id.startsWith(`${providerAlias}/`)) return id.slice(providerAlias.length + 1);
     if (id.startsWith(`${providerId}/`)) return id.slice(providerId.length + 1);
+    if (catalogOwnerKey && id.startsWith(`${catalogOwnerKey}/`)) {
+      return id.slice(catalogOwnerKey.length + 1);
+    }
     return id;
   };
 
-  const filtered = payload.data.filter((model) => model?.owned_by === providerId);
+  const filtered = payload.data.filter(
+    (model) => model?.owned_by === (catalogOwnerKey ?? providerId)
+  );
   const deduped = new Map<string, Record<string, any>>();
 
   for (const model of filtered) {

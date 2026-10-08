@@ -96,6 +96,7 @@ import {
   minKnownNumber,
   maybeOmitCatalogModelName,
   getThinkingCapabilityFields,
+  resolveProviderNodePrefix,
   mergeComboCapabilities,
   getConnectionScopedEffortTiers,
   type ConnectionScopedReasoningCatalog,
@@ -392,14 +393,7 @@ async function buildUnifiedModelsResponseCore(
     const providerNodeIdByPrefix: Record<string, string> = {};
     const nodeIdToProviderType: Record<string, string> = {};
     for (const node of providerNodes) {
-      const resolvedPrefix =
-        node.prefix?.trim() ||
-        node.name
-          ?.trim()
-          ?.toLowerCase()
-          ?.replace(/\s+/g, "-")
-          ?.replace(/[^a-z0-9-]/g, "") ||
-        null;
+      const resolvedPrefix = resolveProviderNodePrefix(node);
       if (resolvedPrefix) {
         providerIdToPrefix[node.id] = resolvedPrefix;
       }
